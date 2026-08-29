@@ -168,10 +168,19 @@ function resolveFfmpegDir() {
 }
 
 // Spawn the backend (packaged binary or dev python+script) with extra args.
+// Prepends the bundled ffmpeg dir to PATH: GUI-launched macOS apps inherit a
+// minimal PATH (no Homebrew), and mlx-whisper decodes audio by invoking
+// `ffmpeg` *by name* — so without this, the bundled ffmpeg is invisible to it
+// and transcription fails on any end-user machine. In dev, resolveFfmpegDir()
+// is null and the system PATH (with Homebrew) is used unchanged.
 function spawnBackend(extraArgs) {
+  const env = { ...process.env };
+  const ffmpegDir = resolveFfmpegDir();
+  if (ffmpegDir) env.PATH = ffmpegDir + path.delimiter + (env.PATH || '');
+
   const backendExe = resolvePythonBackend();
-  if (backendExe) return spawn(backendExe, extraArgs, { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env } });
-  return spawn(devPython(), [resolveBackendScript(), ...extraArgs], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env } });
+  if (backendExe) return spawn(backendExe, extraArgs, { stdio: ['ignore', 'pipe', 'pipe'], env });
+  return spawn(devPython(), [resolveBackendScript(), ...extraArgs], { stdio: ['ignore', 'pipe', 'pipe'], env });
 }
 
 // ---------------------------------------------------------------------------
@@ -272,7 +281,10 @@ class TranscriptionJob {
 // ---------------------------------------------------------------------------
 
 function runPreflight(win) {
-  const proc = spawnBackend(['--preflight', '--ipc']);
+  const ffmpegDir = resolveFfmpegDir();
+  const args = ['--preflight', '--ipc'];
+  if (ffmpegDir) args.push('--ffmpeg-path', ffmpegDir);   // report the bundled binary
+  const proc = spawnBackend(args);
   let output = '';
   proc.stdout.on('data', (d) => (output += d.toString()));
   proc.stderr.on('data', (d) => log('warn', `preflight stderr: ${d.toString().trim()}`));
@@ -370,6 +382,15 @@ app.whenReady().then(() => {
   global.logger.info(`--- EchoScribe ${app.getVersion()} started (${process.platform} ${process.arch}) ---`);
   global.settings = new SettingsStore();
   global.logger.info(`Settings loaded from ${global.settings.filePath}`);
+
+  // First-run default output folder so the app works out of the box (a null
+  // outputDir makes the output/disk preflight checks fail and blocks Run).
+  if (!global.settings.get('outputDir')) {
+    const defaultOut = path.join(app.getPath('documents'), 'EchoScribe Transcripts');
+    try { fs.mkdirSync(defaultOut, { recursive: true }); } catch (_) {}
+    global.settings.set('outputDir', defaultOut);
+    global.logger.info(`Defaulted output folder to ${defaultOut}`);
+  }
 
   createWindow();
   app.on('activate', () => {

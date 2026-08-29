@@ -56,7 +56,10 @@ jobs:
       - name: Install Node dependencies
         run: npm ci
 
-      - name: Build, sign, notarize, publish
+      # electron-builder produces the signed+notarized .app, the ZIP, and
+      # latest-mac.yml (the auto-update chain). No dmg target — we build a
+      # nicer one below. The .app is stapled here, so the DMG opens cleanly.
+      - name: Build app + zip, sign, notarize, publish
         env:
           GH_TOKEN:                    ${{ secrets.GITHUB_TOKEN }}
           CSC_LINK:                    ${{ secrets.CSC_LINK }}
@@ -65,3 +68,21 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID:               ${{ secrets.APPLE_TEAM_ID }}
         run: npx electron-builder --mac --publish always
+
+      # Build the branded installer DMG natively on the arm64 runner via appdmg.
+      # electron-builder forces APFS on Apple Silicon, and Finder won't render a
+      # custom DMG background on APFS — appdmg makes an HFS+ image (verified fine
+      # on arm64), which renders the background. No Intel runner involved.
+      - name: Build branded HFS+ DMG (appdmg)
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          DMG="dist/EchoScribe-${VERSION}-arm64.dmg"
+          npx --yes appdmg build/appdmg.json "$DMG"
+          echo "DMG_PATH=$DMG" >> "$GITHUB_ENV"
+
+      - name: Upload branded DMG to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          gh release upload "$TAG" "$DMG_PATH" --repo ${{ github.repository }} --clobber

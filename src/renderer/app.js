@@ -122,18 +122,33 @@ function setMode(mode) {
 
 async function addPaths(paths) {
   if (state.running) return;
-  const expanded = await api.scanPaths(paths);
-  for (const p of expanded) {
+  $('drop-reject-banner').classList.add('hidden');
+  const { files, skipped } = await api.scanPaths(paths);
+  let overflow = false;
+  for (const p of files) {
     if (state.queue.some((q) => q.path === p)) continue;
-    if (state.mode === 'multitrack' && state.queue.length >= MAX_TRACKS) break;
+    if (state.mode === 'multitrack' && state.queue.length >= MAX_TRACKS) { overflow = true; break; }
     const name = p.split('/').pop();
     const item = { id: _nextId++, path: p, name, speaker: guessSpeaker(name), status: 'queued', duration: null, chunks: null };
     state.queue.push(item);
     probeItem(item);
   }
+  if (skipped && skipped.length) showDropReject(skipped);
+  else if (overflow) showDropMessage(`Multitrack takes at most ${MAX_TRACKS} tracks — extra files were not added.`);
   renderQueue();
   updatePlan();
   updateRunButton();
+}
+
+function showDropReject(skipped) {
+  const n = skipped.length;
+  const names = skipped.slice(0, 3).join(', ') + (n > 3 ? `, +${n - 3} more` : '');
+  showDropMessage(`Not an audio or video file: ${names}. EchoScribe takes audio and video — mp3, wav, m4a, mp4, mov, and more. Video is fine; the audio is pulled out automatically.`);
+}
+
+function showDropMessage(text) {
+  $('drop-reject-text').textContent = text;
+  $('drop-reject-banner').classList.remove('hidden');
 }
 
 function guessSpeaker(filename) {
@@ -646,6 +661,7 @@ function wireEvents() {
   ['dragenter', 'dragover'].forEach((ev) => dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.add('dragover'); }));
   ['dragleave', 'drop'].forEach((ev) => dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.remove('dragover'); }));
   dz.addEventListener('drop', (e) => {
+    e.stopPropagation();   // don't let the window-wide handler double-process
     const paths = [...e.dataTransfer.files].map((f) => f.path).filter(Boolean);
     if (paths.length) addPaths(paths);
   });
@@ -662,6 +678,7 @@ function wireEvents() {
   $('btn-run').addEventListener('click', run);
   $('btn-clear-done').addEventListener('click', () => { state.queue = state.queue.filter((q) => q.status !== 'done'); renderQueue(); updatePlan(); updateRunButton(); });
 
+  $('btn-drop-reject-dismiss').addEventListener('click', () => $('drop-reject-banner').classList.add('hidden'));
   $('btn-reveal-output').addEventListener('click', () => { if (state.lastOutputDir) api.openFolder(state.lastOutputDir); });
   $('btn-reveal-dismiss').addEventListener('click', () => $('reveal-banner').classList.add('hidden'));
 

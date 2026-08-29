@@ -34,7 +34,7 @@ contextBridge.exposeInMainWorld('echoscribe', {
   revealFile: (filePath) => ipcRenderer.invoke('shell:revealFile', filePath),
 
   // --- Media ---
-  /** Expand files/folders → flat list of supported media paths. */
+  /** Expand files/folders → { files: string[], skipped: string[] } (skipped = dropped non-media basenames). */
   scanPaths: (paths) => ipcRenderer.invoke('media:scan', paths),
   /** Duration + planned chunk count for one file: {ok, duration, chunks}. */
   probeMedia: (filePath, chunkLength, overlap) =>

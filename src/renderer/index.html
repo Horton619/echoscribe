@@ -60,8 +60,15 @@
         <button class="rb-dismiss" id="btn-reveal-dismiss" aria-label="Dismiss">&#10005;</button>
       </div>
 
+      <div id="drop-reject-banner" class="drop-reject-banner hidden" role="alert">
+        <span class="dr-icon">&#9888;</span>
+        <span class="dr-text" id="drop-reject-text"></span>
+        <button class="dr-dismiss" id="btn-drop-reject-dismiss" aria-label="Dismiss">&#10005;</button>
+      </div>
+
       <div id="drop-zone">
         <div class="dz-label" id="dz-label">Drop audio or video here, or click to browse</div>
+        <div class="dz-formats">Audio &amp; video — mp3, wav, m4a, mp4, mov, and more. Video is fine; audio is extracted automatically.</div>
         <button id="btn-browse">Browse Files</button>
       </div>
 

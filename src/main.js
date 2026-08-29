@@ -26,6 +26,14 @@ const fs = require('fs');
 const os = require('os');
 const { spawn } = require('child_process');
 
+// Accepted media. ffmpeg decodes all of these (audio is auto-extracted from
+// video containers — no stripping step needed). One source of truth shared by
+// the file picker and the drag-drop scanner.
+const AUDIO_EXTS = ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'oga', 'opus', 'aiff', 'aif', 'wma', 'caf', 'amr'];
+const VIDEO_EXTS = ['mp4', 'mov', 'm4v', 'mkv', 'webm', 'avi', 'wmv', 'flv', 'mpg', 'mpeg', '3gp', 'ts', 'mts', 'm2ts'];
+const MEDIA_EXTS = [...AUDIO_EXTS, ...VIDEO_EXTS];
+const SUPPORTED_MEDIA = new RegExp('\\.(' + MEDIA_EXTS.join('|') + ')$', 'i');
+
 // ---------------------------------------------------------------------------
 // Settings store
 // ---------------------------------------------------------------------------
@@ -387,7 +395,7 @@ ipcMain.handle('dialog:openFiles', async () => {
     title: 'Select audio or video files',
     properties: ['openFile', 'multiSelections'],
     filters: [
-      { name: 'Audio / Video', extensions: ['mp3', 'wav', 'mp4', 'm4a', 'aac', 'flac', 'mov', 'mkv', 'webm'] },
+      { name: 'Audio / Video', extensions: MEDIA_EXTS },
       { name: 'All Files', extensions: ['*'] },
     ],
   });
@@ -419,30 +427,33 @@ ipcMain.handle('shell:revealFile', (e, filePath) => {
 
 // --- Media scan: expand files/folders → flat list of supported media ---
 ipcMain.handle('media:scan', async (e, itemPaths) => {
-  const SUPPORTED = /\.(mp3|wav|mp4|m4a|aac|flac|mov|mkv|webm|ogg|opus|aiff|wma|avi)$/i;
   function scanDir(dir) {
     const out = [];
     try {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
         const full = path.join(dir, entry.name);
         if (entry.isDirectory()) out.push(...scanDir(full));
-        else if (SUPPORTED.test(entry.name)) out.push(full);
+        else if (SUPPORTED_MEDIA.test(entry.name)) out.push(full);
       }
     } catch (_) {}
     return out.sort();
   }
   const result = [];
+  const skipped = [];      // directly-dropped files that aren't media
   const seen = new Set();
   for (const p of itemPaths) {
     try {
       const stat = fs.statSync(p);
-      const paths = stat.isDirectory() ? scanDir(p) : [p];
-      for (const f of paths) {
-        if (!seen.has(f) && SUPPORTED.test(f)) { seen.add(f); result.push(f); }
+      if (stat.isDirectory()) {
+        for (const f of scanDir(p)) if (!seen.has(f)) { seen.add(f); result.push(f); }
+      } else if (SUPPORTED_MEDIA.test(p)) {
+        if (!seen.has(p)) { seen.add(p); result.push(p); }
+      } else {
+        skipped.push(path.basename(p));
       }
     } catch (_) {}
   }
-  return result;
+  return { files: result, skipped };
 });
 
 // --- Media probe: duration + planned chunk count for one file ---

@@ -1,0 +1,53 @@
+{
+  "name": "echoscribe",
+  "version": "0.1.0",
+  "description": "Local audio/video → text transcription for Apple Silicon (mlx-whisper) — Visual Entropy Productions",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "node node_modules/electron/cli.js .",
+    "build:mac": "electron-builder --mac",
+    "release:mac": "electron-builder --mac --publish always"
+  },
+  "build": {
+    "appId": "com.visualentropy.echoscribe",
+    "productName": "EchoScribe",
+    "copyright": "Copyright © 2026 Visual Entropy Productions",
+    "files": [
+      "src/**/*",
+      "assets/**/*"
+    ],
+    "mac": {
+      "target": [
+        { "target": "dmg", "arch": ["arm64"] },
+        { "target": "zip", "arch": ["arm64"] }
+      ],
+      "icon": "assets/icons/icon.icns",
+      "category": "public.app-category.productivity",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "notarize": {
+        "teamId": "L5KZ5KGKXC"
+      },
+      "extraResources": [
+        {
+          "from": "backend/dist/transcribe",
+          "to": "backend/transcribe"
+        }
+      ]
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "Horton619",
+      "repo": "echoscribe"
+    }
+  },
+  "devDependencies": {
+    "electron": "^31.7.7",
+    "electron-builder": "^24.0.0"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.3"
+  }
+}

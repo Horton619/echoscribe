@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en" data-skin="professional">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:" />
+  <title>EchoScribe</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <header>
+    <div class="header-logo">
+      <svg viewBox="0 0 96 80" xmlns="http://www.w3.org/2000/svg" aria-label="EchoScribe logo">
+        <!-- Mic capsule -->
+        <rect x="30" y="8" width="20" height="36" rx="10" fill="#0d1e2e" stroke="#FFB547" stroke-width="1.6"/>
+        <line x1="35" y1="16" x2="45" y2="16" stroke="#FFB547" stroke-width="1.2" opacity="0.6"/>
+        <line x1="35" y1="22" x2="45" y2="22" stroke="#FFB547" stroke-width="1.2" opacity="0.6"/>
+        <line x1="35" y1="28" x2="45" y2="28" stroke="#FFB547" stroke-width="1.2" opacity="0.6"/>
+        <path d="M24 34 a16 16 0 0 0 32 0" fill="none" stroke="#FFB547" stroke-width="1.6"/>
+        <line x1="40" y1="50" x2="40" y2="58" stroke="#FFB547" stroke-width="1.6"/>
+        <line x1="32" y1="58" x2="48" y2="58" stroke="#FFB547" stroke-width="1.6" stroke-linecap="round"/>
+        <!-- Echo waves → script lines -->
+        <line x1="60" y1="18" x2="88" y2="18" stroke="#FFB547" stroke-width="1.8" stroke-linecap="round" opacity="0.9"/>
+        <line x1="60" y1="26" x2="82" y2="26" stroke="#FFB547" stroke-width="1.8" stroke-linecap="round" opacity="0.6"/>
+        <line x1="60" y1="34" x2="86" y2="34" stroke="#FFB547" stroke-width="1.8" stroke-linecap="round" opacity="0.4"/>
+        <line x1="60" y1="42" x2="78" y2="42" stroke="#FFB547" stroke-width="1.8" stroke-linecap="round" opacity="0.25"/>
+      </svg>
+      <div class="header-wordmark">
+        <h1 class="header-title">Echo<span class="header-accent">Scribe</span></h1>
+        <div class="header-tagline" id="header-tagline">Local transcription, on the record</div>
+      </div>
+    </div>
+    <button id="btn-settings" title="Settings">&#9881;</button>
+  </header>
+
+  <!-- Mode switch -->
+  <div class="mode-switch" role="tablist" aria-label="Transcription mode">
+    <button class="mode-tab active" data-mode="batch" role="tab">Batch</button>
+    <button class="mode-tab" data-mode="multitrack" role="tab">Multitrack</button>
+    <div class="mode-hint" id="mode-hint">Transcribe files independently — one transcript each.</div>
+  </div>
+
+  <main>
+
+    <!-- Left pane: drop zone + queue + progress + run button -->
+    <section class="left-pane">
+
+      <div id="reveal-banner" class="reveal-banner hidden" role="status" aria-live="polite">
+        <span class="rb-icon">&#10003;</span>
+        <span class="rb-text" id="reveal-banner-text">Done.</span>
+        <button class="rb-action" id="btn-reveal-output">Reveal in Finder</button>
+        <button class="rb-dismiss" id="btn-reveal-dismiss" aria-label="Dismiss">&#10005;</button>
+      </div>
+
+      <div id="drop-zone">
+        <div class="dz-label" id="dz-label">Drop audio or video here, or click to browse</div>
+        <button id="btn-browse">Browse Files</button>
+      </div>
+
+      <div id="queue-list" role="list" aria-label="Transcription queue"></div>
+      <button id="btn-clear-done" class="hidden" type="button">Clear all done</button>
+
+      <div id="progress-section">
+        <div class="progress-overall" id="progress-overall-text"></div>
+        <div class="progress-bar-wrap">
+          <div class="progress-bar-fill" id="progress-bar"></div>
+        </div>
+        <div class="progress-status" id="progress-status-text"></div>
+      </div>
+
+      <button id="btn-run" class="btn-run state-idle" disabled>Transcribe</button>
+
+    </section>
+
+    <!-- Right sidebar: run settings you confirm before running -->
+    <section class="right-sidebar">
+
+      <!-- Multitrack session name (multitrack mode only) -->
+      <div class="side-block hidden" id="session-block">
+        <div class="side-label">Session name</div>
+        <input type="text" id="session-name-input" class="side-input" placeholder="e.g. TSCRA_Panel_2026" maxlength="80">
+        <div class="side-hint">Names the merged script: <code id="session-example">session_script.txt</code></div>
+      </div>
+
+      <div class="side-block">
+        <div class="side-label">Model</div>
+        <select id="model-select" class="side-select">
+          <option value="mlx-community/whisper-large-v3-turbo">Turbo — fast, great quality (default)</option>
+          <option value="mlx-community/whisper-large-v3-mlx">Large-v3 — max accuracy, slower</option>
+        </select>
+      </div>
+
+      <div class="side-block">
+        <div class="side-label">Vocabulary hint <span class="side-label-opt">optional</span></div>
+        <textarea id="vocab-hint" class="side-textarea" rows="3"
+          placeholder="Proper nouns, acronyms, jargon for this event — e.g. TSCRA, NCARB, Dr. Okafor, Cervantes"></textarea>
+        <div class="side-hint">Nudges Whisper toward the right spelling of names it wouldn't otherwise know.</div>
+      </div>
+
+      <div class="side-block">
+        <div class="side-label">Output</div>
+        <label class="check-label"><input type="checkbox" id="fmt-txt" checked> Plain text (.txt)</label>
+        <label class="check-label"><input type="checkbox" id="fmt-srt" checked> Subtitles (.srt)</label>
+        <label class="check-label hidden" id="script-ts-row"><input type="checkbox" id="script-timestamps" checked> Timestamps in script</label>
+      </div>
+
+      <div class="side-block">
+        <div class="side-label">Output folder</div>
+        <div class="output-folder-row" id="output-folder-row"></div>
+      </div>
+
+      <div class="side-block" id="plan-block">
+        <div class="side-label">Plan</div>
+        <div class="plan-summary" id="plan-summary">Add files to see the plan.</div>
+      </div>
+
+    </section>
+
+  </main>
+
+  <!-- Auto-update toast -->
+  <div id="update-toast" class="update-toast hidden" role="status" aria-live="polite">
+    <div class="update-toast-row">
+      <span class="update-toast-label" id="update-toast-label">Downloading update…</span>
+      <span class="update-toast-percent" id="update-toast-percent"></span>
+      <button class="update-toast-action" id="update-toast-action" style="display:none">Install &amp; Restart</button>
+      <button class="update-toast-dismiss" id="update-toast-dismiss" aria-label="Dismiss">✕</button>
+    </div>
+    <div class="update-toast-bar"><div class="update-toast-fill" id="update-toast-fill"></div></div>
+  </div>
+
+  <footer class="app-footer">
+    <span class="footer-copy">&#169; 2026 Visual Entropy Productions</span>
+    <a href="https://www.veproductions.net" target="_blank" class="footer-link">veproductions.net</a>
+  </footer>
+
+  <!-- Settings Modal -->
+  <div id="settings-overlay" class="settings-overlay hidden">
+    <div class="settings-panel" role="dialog" aria-modal="true" aria-label="Settings">
+      <div class="settings-header">
+        <div class="settings-tabs">
+          <button class="settings-tab active" data-tab="appearance">Appearance</button>
+          <button class="settings-tab" data-tab="transcription">Transcription</button>
+          <button class="settings-tab" data-tab="diagnostics">Diagnostics</button>
+        </div>
+        <button class="settings-close" id="btn-settings-close">&#10005;</button>
+      </div>
+
+      <div class="settings-body">
+
+        <!-- Appearance -->
+        <div class="settings-pane active" id="tab-appearance">
+          <div class="settings-section-label">Skin</div>
+          <div class="skin-options">
+            <button class="skin-option" data-skin="professional">
+              <div class="skin-swatch skin-swatch-pro"></div>
+              <div class="skin-name">EchoScribe Pro</div>
+            </button>
+            <button class="skin-option" data-skin="fun">
+              <div class="skin-swatch skin-swatch-fun"></div>
+              <div class="skin-name">EchoScribe Studio</div>
+            </button>
+          </div>
+        </div>
+
+        <!-- Transcription -->
+        <div class="settings-pane" id="tab-transcription">
+          <div class="settings-row">
+            <div class="settings-row-label">Chunk length</div>
+            <div class="settings-row-control">
+              <input type="number" id="setting-chunk" class="settings-input" min="60" max="1800" step="30">
+              <span class="settings-suffix">seconds</span>
+            </div>
+            <div class="settings-hint">Long files are split into chunks before transcribing — mlx-whisper hallucinates on files over ~20 min. Default 1200 s (20 min). Smaller = more frequent progress.</div>
+          </div>
+          <div class="settings-row">
+            <div class="settings-row-label">Chunk overlap</div>
+            <div class="settings-row-control">
+              <input type="number" id="setting-overlap" class="settings-input" min="0" max="60" step="1">
+              <span class="settings-suffix">seconds</span>
+            </div>
+            <div class="settings-hint">Overlap between chunks so no words are lost at a boundary. Default 10 s.</div>
+          </div>
+          <div class="settings-row">
+            <div class="settings-row-label">Language</div>
+            <div class="settings-row-control">
+              <input type="text" id="setting-language" class="settings-input" placeholder="auto" maxlength="12">
+            </div>
+            <div class="settings-hint">Leave blank to auto-detect. Or force a code like <code>en</code>, <code>es</code>, <code>fr</code>.</div>
+          </div>
+          <div class="settings-row settings-row-inline">
+            <div class="settings-row-label">Auto-open output folder when done</div>
+            <label class="toggle-label">
+              <input type="checkbox" id="setting-auto-open">
+              <span class="toggle-track"></span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Diagnostics -->
+        <div class="settings-pane" id="tab-diagnostics">
+          <div class="diag-actions">
+            <button class="btn-diag-primary" id="btn-run-preflight">Run Preflight Check</button>
+            <button class="btn-diag-secondary" id="btn-copy-preflight" style="display:none">Copy to Clipboard</button>
+          </div>
+          <div id="preflight-results"></div>
+
+          <div class="diag-log-section">
+            <div class="settings-section-label">Software updates</div>
+            <div class="diag-actions">
+              <button class="btn-diag-secondary" id="btn-check-update">Check for Updates</button>
+              <button class="btn-diag-secondary" id="btn-download-update" style="display:none">Download Update</button>
+              <button class="btn-diag-primary"   id="btn-install-update"  style="display:none">Install &amp; Restart</button>
+            </div>
+            <div id="update-status-line" class="update-status-line"></div>
+          </div>
+
+          <div class="diag-log-section">
+            <div class="settings-section-label">Application log</div>
+            <div class="diag-actions">
+              <button class="btn-diag-secondary" id="btn-open-log-file">Open Log File</button>
+              <button class="btn-diag-secondary" id="btn-refresh-log">Refresh</button>
+            </div>
+            <pre id="log-tail" class="log-tail-area"></pre>
+          </div>
+        </div>
+
+      </div>
+
+      <div class="settings-footer">
+        <button id="btn-settings-done">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

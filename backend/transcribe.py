@@ -1,0 +1,672 @@
+#!/usr/bin/env python3
+"""
+EchoScribe backend — local audio/video → text transcription (Apple Silicon).
+
+Pipeline (per input file):
+    ffprobe duration → plan ~20-min chunks w/ ~10s overlap → ffmpeg-extract each
+    chunk to a 16kHz mono wav → mlx_whisper.transcribe each chunk with
+    hallucination-resistant decode params → merge segments back to a single
+    continuous timeline (offset + midpoint-of-overlap dedup) → write .txt / .srt
+    atomically.
+
+Why chunk at all: mlx-whisper has a known bug on long audio where it gets stuck
+repeating the same sentence for minutes. Never feed it a >~20-min file whole.
+See github.com/1c7/mlx-whisper-long for the pattern this mirrors.
+
+Talks to the Electron main process over NDJSON on stdout (one JSON object per
+line) when --ipc is set. Message types: media_info, start, progress, done,
+warn, error, batch_done, plus one-shot probes (probe_result, preflight_result).
+
+⚠ The CLI flags and NDJSON types are a three-way contract (this file +
+  src/main.js + src/renderer/app.js). Changing one without the others silently
+  breaks the app. See docs/IPC.md.
+
+v2 seam (diarization): merge() returns plain segment dicts (start/end/text).
+A future whisperx-mlx speaker-labeling pass slots in between merge() and
+write_outputs() without reshaping anything here — do not couple those steps.
+"""
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+# ---------------------------------------------------------------------------
+# IPC / logging
+# ---------------------------------------------------------------------------
+
+_ipc_mode = False
+
+
+def _emit(obj: dict):
+    """One JSON line to stdout (IPC) or human-readable text (CLI)."""
+    if _ipc_mode:
+        print(json.dumps(obj), flush=True)
+        return
+    t = obj.get("type", "")
+    if t == "media_info":
+        print(f"  {obj['file']}: {obj['duration']:.0f}s → {obj['chunks']} chunk(s)")
+    elif t == "start":
+        print(f"\n[{obj['file_index']}/{obj['total_files']}] {obj['file']}")
+    elif t == "progress":
+        print(f"  chunk {obj['chunk']}/{obj['total_chunks']}  {obj['message']}", end="\r")
+    elif t == "done":
+        print(f"\n  ✓ {obj['file']} → {', '.join(obj['outputs'])}")
+    elif t == "warn":
+        print(f"  ! {obj.get('message','')}")
+    elif t == "error":
+        print(f"\n  ✗ Error: {obj.get('message','')}", file=sys.stderr)
+    elif t == "batch_done":
+        print(f"\nBatch complete: {obj['transcribed']} done, {obj['errors']} errors.")
+
+
+def _warn(msg, file=None):
+    _emit({"type": "warn", "message": str(msg), "file": file})
+
+
+# ---------------------------------------------------------------------------
+# ffmpeg / ffprobe
+# ---------------------------------------------------------------------------
+
+def _ffbin(name: str, override: str | None) -> str:
+    """Resolve an ffmpeg-family binary: explicit dir override, else PATH."""
+    if override:
+        cand = os.path.join(override, name)
+        if os.path.exists(cand):
+            return cand
+    return name  # rely on PATH
+
+
+def ffprobe_duration(path: str, ffprobe_bin: str) -> float:
+    out = subprocess.run(
+        [ffprobe_bin, "-v", "quiet", "-print_format", "json",
+         "-show_format", path],
+        capture_output=True, text=True,
+    )
+    if out.returncode != 0:
+        raise RuntimeError(f"ffprobe failed: {out.stderr.strip() or 'unknown error'}")
+    data = json.loads(out.stdout)
+    dur = data.get("format", {}).get("duration")
+    if dur is None:
+        raise RuntimeError("could not read media duration")
+    return float(dur)
+
+
+def plan_chunks(duration: float, segment: float, overlap: float):
+    """
+    Return [(index, global_start, chunk_duration)] covering [0, duration].
+    Consecutive chunks advance by (segment - overlap) so each overlaps its
+    neighbour by `overlap` seconds — no words lost at a boundary.
+    """
+    if duration <= segment:
+        return [(0, 0.0, duration)]
+    step = max(1.0, segment - overlap)
+    chunks = []
+    start = 0.0
+    idx = 0
+    while start < duration:
+        dur = min(segment, duration - start)
+        chunks.append((idx, start, dur))
+        if start + dur >= duration:
+            break
+        start += step
+        idx += 1
+    return chunks
+
+
+def extract_chunk(input_path, global_start, dur, out_wav, ffmpeg_bin):
+    """Cut one 16kHz mono PCM wav chunk. Input-seek for speed; the 10s overlap
+    and Whisper's own alignment absorb any sub-second seek imprecision."""
+    cmd = [
+        ffmpeg_bin, "-nostdin", "-y",
+        "-ss", f"{global_start:.3f}", "-i", input_path,
+        "-t", f"{dur:.3f}",
+        "-ac", "1", "-ar", "16000", "-vn", "-c:a", "pcm_s16le",
+        out_wav,
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg chunk extract failed: {proc.stderr.strip()[-400:]}")
+
+
+# ---------------------------------------------------------------------------
+# Transcription + merge
+# ---------------------------------------------------------------------------
+
+# Hallucination-resistant decode params (from mlx-whisper-long). Keep these —
+# they're what makes long-file output trustworthy.
+_DECODE_OPTS = dict(
+    condition_on_previous_text=False,
+    no_speech_threshold=0.6,
+    compression_ratio_threshold=2.4,
+    word_timestamps=True,
+)
+
+
+def transcribe_chunk(wav_path, model_id, initial_prompt, language):
+    import mlx_whisper  # imported lazily so --preflight can report a clean error
+    opts = dict(_DECODE_OPTS)
+    if initial_prompt:
+        opts["initial_prompt"] = initial_prompt
+    if language:
+        opts["language"] = language
+    return mlx_whisper.transcribe(wav_path, path_or_hf_repo=model_id, **opts)
+
+
+def merge(chunk_results, overlap: float):
+    """
+    chunk_results: list of (global_start, whisper_result) in order.
+    Offset each chunk's local segment times by its global_start, then stitch:
+    at each seam keep the earlier chunk's segments up to the overlap midpoint
+    and the later chunk's from the midpoint on. Returns [{start,end,text}].
+    """
+    merged = []
+    for i, (gstart, result) in enumerate(chunk_results):
+        segs = result.get("segments") or []
+        for s in segs:
+            seg = {
+                "start": float(s["start"]) + gstart,
+                "end": float(s["end"]) + gstart,
+                "text": s["text"].strip(),
+            }
+            if i > 0:
+                # Seam is the midpoint of this chunk's overlap with the previous.
+                boundary = gstart + overlap / 2.0
+                if seg["start"] < boundary:
+                    continue
+            if seg["text"]:
+                merged.append(seg)
+    return merged
+
+
+# ---------------------------------------------------------------------------
+# Output writers (atomic: temp + os.replace)
+# ---------------------------------------------------------------------------
+
+def _atomic_write(path, text):
+    d = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def _srt_ts(t: float) -> str:
+    if t < 0:
+        t = 0.0
+    h = int(t // 3600)
+    m = int((t % 3600) // 60)
+    s = int(t % 60)
+    ms = int(round((t - int(t)) * 1000))
+    if ms == 1000:
+        ms = 0
+        s += 1
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def write_srt(path, segments):
+    lines = []
+    for i, seg in enumerate(segments, 1):
+        lines.append(str(i))
+        lines.append(f"{_srt_ts(seg['start'])} --> {_srt_ts(seg['end'])}")
+        lines.append(seg["text"])
+        lines.append("")
+    _atomic_write(path, "\n".join(lines))
+
+
+def write_txt(path, segments):
+    _atomic_write(path, "\n".join(seg["text"] for seg in segments) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# Per-file driver
+# ---------------------------------------------------------------------------
+
+def process_file(path, file_index, total_files, opts):
+    name = os.path.basename(path)
+    ffmpeg_bin = _ffbin("ffmpeg", opts.ffmpeg_path)
+    ffprobe_bin = _ffbin("ffprobe", opts.ffmpeg_path)
+
+    duration = ffprobe_duration(path, ffprobe_bin)
+    chunks = plan_chunks(duration, opts.chunk_length, opts.overlap)
+    _emit({"type": "media_info", "file": name, "duration": duration, "chunks": len(chunks)})
+    _emit({"type": "start", "file": name, "file_index": file_index, "total_files": total_files})
+
+    tmpdir = tempfile.mkdtemp(prefix="echoscribe_")
+    chunk_results = []
+    try:
+        for (idx, gstart, dur) in chunks:
+            _emit({
+                "type": "progress", "file": name,
+                "chunk": idx + 1, "total_chunks": len(chunks),
+                "percent": round(100 * gstart / duration) if duration else 0,
+                "message": f"transcribing {int(gstart)//60}:{int(gstart)%60:02d}…",
+            })
+            wav = os.path.join(tmpdir, f"chunk_{idx:03d}.wav")
+            extract_chunk(path, gstart, dur, wav, ffmpeg_bin)
+            result = transcribe_chunk(wav, opts.model, opts.initial_prompt, opts.language)
+            chunk_results.append((gstart, result))
+            os.unlink(wav)
+
+        segments = merge(chunk_results, opts.overlap)
+
+        base = os.path.splitext(name)[0]
+        out_dir = opts.output_dir or os.path.dirname(path)
+        os.makedirs(out_dir, exist_ok=True)
+        formats = [f.strip() for f in opts.formats.split(",") if f.strip()]
+        outputs = []
+        if "txt" in formats:
+            p = os.path.join(out_dir, base + ".txt")
+            write_txt(p, segments)
+            outputs.append(p)
+        if "srt" in formats:
+            p = os.path.join(out_dir, base + ".srt")
+            write_srt(p, segments)
+            outputs.append(p)
+
+        lang = chunk_results[0][1].get("language") if chunk_results else None
+        _emit({
+            "type": "done", "file": name, "outputs": outputs,
+            "segments": len(segments), "duration": duration,
+            "chunks": len(chunks), "language": lang, "output_dir": out_dir,
+        })
+        return True
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Multitrack mode — diarization-by-hardware
+#
+# Input: 2–6 sample-aligned tracks (one mic per speaker, recorded on a single
+# multitrack recorder so they share a clock) + a speaker name per track.
+#
+# Pipeline:
+#   1. Auto-mixer gate (per 25ms block, only the loudest track stays open) so
+#      each track transcribes only where its speaker was dominant — kills bleed
+#      at the source.
+#   2. Transcribe each gated track (chunked, same core as batch mode).
+#   3. Merge all segments on the shared timeline, label by speaker, run a
+#      similarity+energy dedup as a safety net, coalesce consecutive same-speaker
+#      turns, and write a script (.txt + speaker-prefixed .srt) plus each track's
+#      own transcript.
+#
+# Tunables live here as module constants — perfect separation isn't required
+# because the merge-time dedup catches residual bleed.
+# ---------------------------------------------------------------------------
+
+SR = 16000
+_GATE_BLOCK = 400          # samples per envelope block (25ms @ 16kHz)
+_GATE_RELEASE = 12         # blocks (~300ms) a winner holds open across trailing silence
+_GATE_PREROLL = 3          # blocks (~75ms) opened before a winner to catch word onsets
+_GATE_FLOOR_FRAC = 0.15    # gate floor as a fraction of the session's speech level
+_GATE_FLOOR_MIN = 0.005    # absolute floor so pure silence never "wins"
+_DEDUP_TIME_OVERLAP = 0.5  # min fractional time overlap to consider two segs duplicates
+_DEDUP_TEXT_RATIO = 0.75   # min text similarity to treat overlapping segs as duplicates
+
+
+def load_audio_16k(path):
+    import numpy as np
+    import mlx_whisper.audio as A
+    # load_audio returns an mlx array; gating math is numpy, so convert here.
+    return np.asarray(A.load_audio(path, sr=SR), dtype=np.float32)
+
+
+def block_rms(audio):
+    """Non-overlapping 25ms-block RMS envelope. O(n) memory."""
+    import numpy as np
+    nb = len(audio) // _GATE_BLOCK
+    if nb == 0:
+        return np.zeros(0, dtype=np.float32)
+    frames = audio[:nb * _GATE_BLOCK].reshape(nb, _GATE_BLOCK)
+    return np.sqrt((frames.astype(np.float32) ** 2).mean(axis=1))
+
+
+def compute_gates(envs):
+    """
+    envs: list of per-track block-RMS arrays (possibly differing lengths).
+    Returns (gates, envs_padded): gates[i] is a bool array (per block) — True
+    where track i is the open mic. Only the loudest track above the floor is
+    open at each block; a winner holds open through short trailing silence and
+    opens slightly early (pre-roll) so word edges aren't clipped.
+    """
+    import numpy as np
+    T = max((len(e) for e in envs), default=0)
+    padded = np.zeros((len(envs), T), dtype=np.float32)
+    for i, e in enumerate(envs):
+        padded[i, :len(e)] = e
+
+    peak = padded.max(axis=0)
+    winner = padded.argmax(axis=0)
+    voiced = peak[peak > _GATE_FLOOR_MIN]
+    speech_level = float(np.percentile(voiced, 75)) if voiced.size else 0.0
+    floor = max(_GATE_FLOOR_MIN, _GATE_FLOOR_FRAC * speech_level)
+    active = peak > floor
+
+    gates = []
+    for i in range(len(envs)):
+        g = (winner == i) & active
+        # Release: keep this mic open across following silence blocks.
+        hold = 0
+        for t in range(T):
+            if g[t]:
+                hold = _GATE_RELEASE
+            elif hold > 0 and not active[t]:
+                g[t] = True
+                hold -= 1
+            else:
+                hold = 0
+        # Pre-roll: open a few blocks before each rising edge.
+        rising = np.where(g[1:] & ~g[:-1])[0] + 1
+        for r in rising:
+            g[max(0, r - _GATE_PREROLL):r] = True
+        gates.append(g)
+    return gates, padded
+
+
+def apply_gate(audio, gate_blocks):
+    """Zero every sample outside this track's open-mic blocks."""
+    import numpy as np
+    mask = np.repeat(gate_blocks, _GATE_BLOCK)
+    n = min(len(audio), len(mask))
+    out = np.zeros(len(audio), dtype=audio.dtype)
+    out[:n] = audio[:n] * mask[:n]
+    return out
+
+
+def chunk_and_transcribe_array(audio, opts, progress_cb=None):
+    """Slice an in-memory 16kHz array into overlapping chunks, transcribe each,
+    merge to one continuous timeline. Mirrors the batch-mode ffmpeg path but for
+    audio we already hold in memory (gated multitrack tracks)."""
+    import mlx_whisper
+    seg_samples = int(opts.chunk_length * SR)
+    step = max(1, int((opts.chunk_length - opts.overlap) * SR))
+    total = len(audio)
+    starts = list(range(0, total, step)) if total > seg_samples else [0]
+    results = []
+    for k, s in enumerate(starts):
+        if progress_cb:
+            progress_cb(k + 1, len(starts), s / SR)
+        clip = audio[s:s + seg_samples]
+        dopts = dict(_DECODE_OPTS)
+        if opts.initial_prompt:
+            dopts["initial_prompt"] = opts.initial_prompt
+        if opts.language:
+            dopts["language"] = opts.language
+        result = mlx_whisper.transcribe(clip, path_or_hf_repo=opts.model, **dopts)
+        results.append((s / SR, result))
+        if s + seg_samples >= total:
+            break
+    return merge(results, opts.overlap)
+
+
+def _energy_at(env, start, end):
+    """Mean block-RMS of a track over [start,end] seconds — used to pick the
+    louder track when the dedup finds the same remark on two mics."""
+    import numpy as np
+    a = int(start * SR / _GATE_BLOCK)
+    b = max(a + 1, int(end * SR / _GATE_BLOCK))
+    seg = env[a:b]
+    return float(seg.mean()) if seg.size else 0.0
+
+
+def _norm_text(t):
+    return "".join(c.lower() for c in t if c.isalnum() or c.isspace()).strip()
+
+
+def dedup_across_tracks(segments):
+    """Drop residual bleed: when two segments from different speakers overlap in
+    time and say nearly the same thing, keep the one on the louder track."""
+    from difflib import SequenceMatcher
+    kept = []
+    for seg in segments:
+        dup_of = None
+        for j in range(len(kept) - 1, -1, -1):
+            k = kept[j]
+            if k["start"] > seg["end"]:
+                continue
+            if k["end"] < seg["start"] - 2.0:
+                break  # sorted by start; nothing earlier can overlap
+            if k["speaker"] == seg["speaker"]:
+                continue
+            ov = min(k["end"], seg["end"]) - max(k["start"], seg["start"])
+            shorter = min(k["end"] - k["start"], seg["end"] - seg["start"]) or 1e-6
+            if ov / shorter < _DEDUP_TIME_OVERLAP:
+                continue
+            if SequenceMatcher(None, _norm_text(k["text"]), _norm_text(seg["text"])).ratio() >= _DEDUP_TEXT_RATIO:
+                dup_of = j
+                break
+        if dup_of is None:
+            kept.append(seg)
+        elif seg["energy"] > kept[dup_of]["energy"]:
+            kept[dup_of] = seg  # incoming track was louder — it wins
+    return kept
+
+
+def _script_ts(t):
+    h = int(t // 3600); m = int((t % 3600) // 60); s = int(t % 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def write_script_txt(path, segments, timestamps=True):
+    """Coalesce consecutive same-speaker segments into turns. With timestamps
+    off, produces a clean reading script (`Name: …`) with no time prefixes."""
+    lines = []
+    cur_spk = None
+    buf = []
+    start = 0.0
+    def flush():
+        if buf:
+            prefix = f"[{_script_ts(start)}] " if timestamps else ""
+            lines.append(f"{prefix}{cur_spk}: {' '.join(buf)}")
+            lines.append("")
+    for seg in segments:
+        if seg["speaker"] != cur_spk:
+            flush()
+            cur_spk = seg["speaker"]
+            buf = []
+            start = seg["start"]
+        buf.append(seg["text"])
+    flush()
+    _atomic_write(path, "\n".join(lines) + "\n")
+
+
+def write_script_srt(path, segments):
+    lines = []
+    for i, seg in enumerate(segments, 1):
+        lines.append(str(i))
+        lines.append(f"{_srt_ts(seg['start'])} --> {_srt_ts(seg['end'])}")
+        lines.append(f"{seg['speaker']}: {seg['text']}")
+        lines.append("")
+    _atomic_write(path, "\n".join(lines))
+
+
+def process_multitrack(files, speakers, opts):
+    if len(files) != len(speakers):
+        raise RuntimeError("multitrack needs one speaker name per file")
+    n = len(files)
+    _emit({"type": "start", "file": opts.session_name or "session",
+           "file_index": 1, "total_files": 1, "multitrack": True, "tracks": n})
+
+    # Phase A: envelopes only (one raw track in memory at a time).
+    _emit({"type": "progress", "chunk": 0, "total_chunks": n, "percent": 0,
+           "message": "analyzing levels for auto-mixer…"})
+    envs = []
+    for path in files:
+        envs.append(block_rms(load_audio_16k(path)))
+
+    # Phase B: winner/gate decision across the shared timeline.
+    gates, envs_padded = compute_gates(envs)
+
+    # Phase C: gate + transcribe each track; tag its segments with the speaker.
+    all_segments = []
+    per_track_segments = []
+    for i, (path, name) in enumerate(zip(files, speakers)):
+        def cb(cur, tot, secs, _i=i, _name=name):
+            _emit({"type": "progress", "file": _name,
+                   "chunk": i + 1, "total_chunks": n,
+                   "percent": round(100 * (i + (cur / max(tot, 1))) / n),
+                   "message": f"transcribing {_name} ({cur}/{tot})…"})
+        gated = apply_gate(load_audio_16k(path), gates[i])
+        segs = chunk_and_transcribe_array(gated, opts, cb)
+        for s in segs:
+            s["speaker"] = name
+            s["track"] = i
+            s["energy"] = _energy_at(envs_padded[i], s["start"], s["end"])
+        per_track_segments.append((name, segs))
+        all_segments.extend(segs)
+
+    # Phase D: merge → dedup → write.
+    all_segments.sort(key=lambda s: s["start"])
+    final = dedup_across_tracks(all_segments)
+
+    out_dir = opts.output_dir or os.path.dirname(files[0])
+    os.makedirs(out_dir, exist_ok=True)
+    session = opts.session_name or "session"
+    outputs = []
+
+    formats = [f.strip() for f in opts.formats.split(",") if f.strip()]
+    if "txt" in formats:
+        p = os.path.join(out_dir, f"{session}_script.txt")
+        write_script_txt(p, final, timestamps=opts.script_timestamps); outputs.append(p)
+    if "srt" in formats:
+        p = os.path.join(out_dir, f"{session}_script.srt")
+        write_script_srt(p, final); outputs.append(p)
+
+    # Per-speaker transcripts (opt-in via --per-speaker).
+    if opts.per_speaker:
+        for name, segs in per_track_segments:
+            safe = re.sub(r"[^\w\-]+", "_", name).strip("_") or "track"
+            if "txt" in formats:
+                p = os.path.join(out_dir, f"{session}_{safe}.txt")
+                write_txt(p, segs); outputs.append(p)
+            if "srt" in formats:
+                p = os.path.join(out_dir, f"{session}_{safe}.srt")
+                write_srt(p, segs); outputs.append(p)
+
+    _emit({"type": "done", "file": session, "outputs": outputs,
+           "segments": len(final), "speakers": speakers,
+           "multitrack": True, "output_dir": out_dir})
+    _emit({"type": "batch_done", "transcribed": 1, "errors": 0})
+
+
+# ---------------------------------------------------------------------------
+# Probes
+# ---------------------------------------------------------------------------
+
+def run_probe(path, opts):
+    """One-shot: report duration + planned chunk count for a single file."""
+    try:
+        ffprobe_bin = _ffbin("ffprobe", opts.ffmpeg_path)
+        duration = ffprobe_duration(path, ffprobe_bin)
+        chunks = plan_chunks(duration, opts.chunk_length, opts.overlap)
+        _emit({"type": "probe_result", "ok": True, "file": os.path.basename(path),
+               "duration": duration, "chunks": len(chunks)})
+    except Exception as e:
+        _emit({"type": "probe_result", "ok": False, "error": str(e)})
+
+
+def run_preflight(opts):
+    results = {}
+
+    ffmpeg_bin = _ffbin("ffmpeg", opts.ffmpeg_path)
+    try:
+        subprocess.run([ffmpeg_bin, "-version"], capture_output=True, check=True)
+        results["ffmpeg"] = {"ok": True, "message": ffmpeg_bin}
+    except Exception as e:
+        results["ffmpeg"] = {"ok": False, "message": str(e)}
+
+    try:
+        import mlx_whisper  # noqa: F401
+        import mlx  # noqa: F401
+        results["mlx_whisper"] = {"ok": True, "message": "mlx-whisper importable"}
+    except Exception as e:
+        results["mlx_whisper"] = {"ok": False, "message": str(e)}
+
+    _emit({"type": "preflight_result", "results": results})
+
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
+def main():
+    global _ipc_mode
+
+    p = argparse.ArgumentParser(description="EchoScribe transcription backend")
+    p.add_argument("inputs", nargs="*", help="audio/video files")
+    p.add_argument("--output-dir", "-o", default=None)
+    p.add_argument("--model", default="mlx-community/whisper-large-v3-turbo",
+                   help="HF repo id for the mlx-whisper model")
+    p.add_argument("--chunk-length", type=float, default=1200.0,
+                   help="chunk length in seconds (default 1200 = 20 min)")
+    p.add_argument("--overlap", type=float, default=10.0,
+                   help="overlap between chunks in seconds")
+    p.add_argument("--initial-prompt", default=None,
+                   help="vocabulary hint passed to Whisper as --initial-prompt")
+    p.add_argument("--language", default=None,
+                   help="force a language code; omit to auto-detect")
+    p.add_argument("--formats", default="txt,srt", help="comma list: txt,srt")
+    p.add_argument("--ffmpeg-path", default=None,
+                   help="directory containing ffmpeg/ffprobe (else PATH)")
+    # Multitrack mode (diarization-by-hardware) — see process_multitrack.
+    p.add_argument("--multitrack", action="store_true",
+                   help="treat inputs as one speaker per aligned track")
+    p.add_argument("--speakers", default=None, metavar="JSON",
+                   help="JSON array of speaker names, one per input file")
+    p.add_argument("--session-name", default="session",
+                   help="base name for the merged script output")
+    p.add_argument("--per-speaker", action="store_true",
+                   help="also write each track's own transcript")
+    p.add_argument("--script-timestamps", choices=["yes", "no"], default="yes",
+                   help="include [HH:MM:SS] prefixes in the merged script .txt")
+    p.add_argument("--ipc", action="store_true", help="emit NDJSON on stdout")
+    p.add_argument("--probe", default=None, metavar="FILE",
+                   help="report duration + chunk plan for one file, then exit")
+    p.add_argument("--preflight", action="store_true",
+                   help="check ffmpeg + mlx-whisper availability, then exit")
+    opts = p.parse_args()
+
+    _ipc_mode = opts.ipc
+
+    if opts.preflight:
+        run_preflight(opts)
+        return
+    if opts.probe:
+        run_probe(opts.probe, opts)
+        return
+
+    if opts.multitrack:
+        opts.script_timestamps = (opts.script_timestamps == "yes")
+        speakers = json.loads(opts.speakers) if opts.speakers else \
+            [os.path.splitext(os.path.basename(f))[0] for f in opts.inputs]
+        try:
+            process_multitrack(opts.inputs, speakers, opts)
+        except Exception as e:
+            _emit({"type": "error", "file": opts.session_name, "message": str(e)})
+            _emit({"type": "batch_done", "transcribed": 0, "errors": 1})
+        return
+
+    total = len(opts.inputs)
+    transcribed = errors = 0
+    for i, path in enumerate(opts.inputs, 1):
+        try:
+            if process_file(path, i, total, opts):
+                transcribed += 1
+        except Exception as e:
+            errors += 1
+            _emit({"type": "error", "file": os.path.basename(path), "message": str(e)})
+
+    _emit({"type": "batch_done", "transcribed": transcribed, "errors": errors})
+
+
+if __name__ == "__main__":
+    main()

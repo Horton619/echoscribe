@@ -34,6 +34,10 @@
         {
           "from": "backend/dist/transcribe",
           "to": "backend/transcribe"
+        },
+        {
+          "from": "vendor/ffmpeg/mac",
+          "to": "ffmpeg"
         }
       ]
     },

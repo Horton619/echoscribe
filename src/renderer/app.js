@@ -558,6 +558,12 @@ async function loadModelsStatus() {
   maybeShowModelPrompt();
 }
 
+function fmtGB(bytes) {
+  if (!bytes) return '';
+  const gb = bytes / 1073741824;
+  return gb >= 1 ? `${gb.toFixed(1)} GB` : `${Math.round(bytes / 1048576)} MB`;
+}
+
 function renderModelsList() {
   const el = $('models-list');
   if (!el) return;
@@ -565,10 +571,21 @@ function renderModelsList() {
   for (const m of (state.models || [])) {
     const cls = m.state || (m.cached ? 'cached' : 'missing');
     const icon = { cached: '✓', missing: '○', downloading: '◐', done: '✓', error: '✕' }[cls] || '○';
-    const label = { cached: 'Cached', missing: 'Not downloaded', downloading: 'Downloading…', done: 'Cached', error: 'Failed' }[cls] || '';
+    const downloading = cls === 'downloading';
+    let stateText = { cached: 'Cached', missing: 'Not downloaded', done: 'Cached', error: 'Failed' }[cls] || '';
+    if (downloading) {
+      const pct = m.percent != null ? `${m.percent}%` : '…';
+      stateText = m.total ? `${pct} · ${fmtGB(m.downloaded)} / ${fmtGB(m.total)}` : pct;
+    }
     const row = document.createElement('div');
     row.className = `model-row ${cls === 'done' ? 'cached' : cls}`;
-    row.innerHTML = `<span class="mr-icon">${icon}</span><span class="mr-label">${m.label}</span><span class="mr-state">${label}</span>`;
+    row.innerHTML = `<span class="mr-icon">${icon}</span><span class="mr-label">${m.label}</span><span class="mr-state">${stateText}</span>`;
+    if (downloading) {
+      const bar = document.createElement('div');
+      bar.className = 'model-bar';
+      bar.innerHTML = `<div class="model-bar-fill" style="width:${m.percent || 0}%"></div>`;
+      row.appendChild(bar);
+    }
     el.appendChild(row);
   }
 }
@@ -597,8 +614,16 @@ function handleModelsProgress(msg) {
     const m = (state.models || []).find((x) => x.repo === msg.repo);
     if (m) {
       m.state = msg.state;
+      m.percent = msg.percent;
+      m.downloaded = msg.downloaded;
+      m.total = msg.total;
       if (msg.state === 'done' || msg.state === 'cached') m.cached = true;
       renderModelsList();
+    }
+    if (msg.state === 'downloading') {
+      $('models-download-status').textContent = msg.total
+        ? `Downloading ${msg.label} — ${msg.percent}% (${fmtGB(msg.downloaded)} / ${fmtGB(msg.total)})`
+        : `Downloading ${msg.label}…`;
     }
     if (msg.state === 'error') $('models-download-status').textContent = `Error: ${msg.message || 'download failed'}`;
   } else if (msg.type === 'models_done') {

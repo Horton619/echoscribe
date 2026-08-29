@@ -1,6 +1,6 @@
 {
   "name": "echoscribe",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Local audio/video → text transcription for Apple Silicon (mlx-whisper) — Visual Entropy Productions",
   "author": "Visual Entropy Productions",
   "main": "src/main.js",
@@ -54,6 +54,7 @@
     },
     "dmg": {
       "title": "EchoScribe ${version}",
+      "format": "UDZO",
       "background": "build/dmg-background.png",
       "icon": "assets/icons/icon.icns",
       "iconSize": 120,

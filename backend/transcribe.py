@@ -604,17 +604,57 @@ def run_models_status():
            "models": [{"repo": r, "label": l, "cached": _model_cached(r)} for r, l in MODELS]})
 
 
+def _dir_size(path):
+    total = 0
+    for root, _, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+            except OSError:
+                pass
+    return total
+
+
 def run_download_models():
-    from huggingface_hub import snapshot_download
+    import threading
+    from huggingface_hub import snapshot_download, HfApi
+    from huggingface_hub.constants import HF_HUB_CACHE
+
+    api = HfApi()
     for r, l in MODELS:
         if _model_cached(r):
-            _emit({"type": "model_download", "repo": r, "label": l, "state": "cached"})
+            _emit({"type": "model_download", "repo": r, "label": l, "state": "cached", "percent": 100})
             continue
-        _emit({"type": "model_download", "repo": r, "label": l, "state": "downloading"})
+
+        # Total download size, so the UI can show a real percent + MB counter.
+        try:
+            info = api.model_info(r, files_metadata=True)
+            total = sum((s.size or 0) for s in info.siblings) or 0
+        except Exception:
+            total = 0
+
+        # hf downloads land (incl. .incomplete temp files) under blobs/ — poll its
+        # size on a thread for progress; version-proof vs. hooking tqdm internals.
+        blobs = os.path.join(HF_HUB_CACHE, "models--" + r.replace("/", "--"), "blobs")
+        _emit({"type": "model_download", "repo": r, "label": l, "state": "downloading", "percent": 0, "downloaded": 0, "total": total})
+
+        stop = threading.Event()
+
+        def poll(repo=r, label=l, blobs=blobs, total=total):
+            while not stop.wait(0.6):
+                done = _dir_size(blobs) if os.path.isdir(blobs) else 0
+                pct = min(99, round(100 * done / total)) if total else 0
+                _emit({"type": "model_download", "repo": repo, "label": label,
+                       "state": "downloading", "percent": pct, "downloaded": done, "total": total})
+
+        t = threading.Thread(target=poll, daemon=True)
+        t.start()
         try:
             snapshot_download(r)
-            _emit({"type": "model_download", "repo": r, "label": l, "state": "done"})
+            stop.set(); t.join(timeout=1)
+            _emit({"type": "model_download", "repo": r, "label": l, "state": "done", "percent": 100, "total": total})
         except Exception as e:
+            stop.set(); t.join(timeout=1)
             _emit({"type": "model_download", "repo": r, "label": l, "state": "error", "message": str(e)})
     _emit({"type": "models_done"})
 

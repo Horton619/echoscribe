@@ -46,7 +46,7 @@ Plus `src/preload.js` exposes the renderer-facing API (`window.echoscribe`).
 | `probe_result` | ok, duration, chunks | `--probe` only |
 | `preflight_result` | results{check:{ok,message}} incl. `smoke_test` | `--preflight` only |
 | `models_status` | models[{repo,label,cached}] | `--models-status` only |
-| `model_download` | repo, label, state (downloading/done/cached/error) | `--download-models`, per model |
+| `model_download` | repo, label, state (downloading/done/cached/error), percent, downloaded, total | `--download-models`, streamed per model |
 | `models_done` | — | end of `--download-models` |
 
 `--preflight` runs a real transcription of a bundled verified clip

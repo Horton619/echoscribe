@@ -78,7 +78,8 @@
     "publish": {
       "provider": "github",
       "owner": "Horton619",
-      "repo": "echoscribe"
+      "repo": "echoscribe",
+      "releaseType": "release"
     }
   },
   "devDependencies": {

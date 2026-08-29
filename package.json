@@ -1,6 +1,6 @@
 {
   "name": "echoscribe",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Local audio/video → text transcription for Apple Silicon (mlx-whisper) — Visual Entropy Productions",
   "author": "Visual Entropy Productions",
   "main": "src/main.js",
@@ -19,8 +19,18 @@
     ],
     "mac": {
       "target": [
-        { "target": "dmg", "arch": ["arm64"] },
-        { "target": "zip", "arch": ["arm64"] }
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64"
+          ]
+        }
       ],
       "icon": "assets/icons/icon.icns",
       "category": "public.app-category.productivity",
@@ -47,10 +57,22 @@
       "background": "build/dmg-background.png",
       "icon": "assets/icons/icon.icns",
       "iconSize": 120,
-      "window": { "width": 600, "height": 400 },
+      "window": {
+        "width": 600,
+        "height": 400
+      },
       "contents": [
-        { "x": 150, "y": 210, "type": "file" },
-        { "x": 450, "y": 210, "type": "link", "path": "/Applications" }
+        {
+          "x": 150,
+          "y": 210,
+          "type": "file"
+        },
+        {
+          "x": 450,
+          "y": 210,
+          "type": "link",
+          "path": "/Applications"
+        }
       ]
     },
     "publish": {

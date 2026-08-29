@@ -1,0 +1,35 @@
+<svg width="600" height="400" viewBox="0 0 600 400" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0E1420"/>
+      <stop offset="1" stop-color="#070910"/>
+    </linearGradient>
+    <linearGradient id="amber" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#FFC24D"/>
+      <stop offset="1" stop-color="#FF9E3D"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="600" height="400" fill="url(#bg)"/>
+  <rect x="0.5" y="0.5" width="599" height="399" fill="none" stroke="#1E2840" stroke-width="1"/>
+
+  <!-- wordmark -->
+  <text x="300" y="72" text-anchor="middle" font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-size="40" font-weight="700" letter-spacing="-1">
+    <tspan fill="#DDE2F0">Echo</tspan><tspan fill="#FFB547" font-weight="300">Scribe</tspan>
+  </text>
+  <text x="300" y="98" text-anchor="middle" font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-size="11" letter-spacing="3" fill="#8A7A55">LOCAL TRANSCRIPTION</text>
+
+  <!-- arrow from app (left, ~x150) to Applications (right, ~x450), at icon row y~210 -->
+  <g stroke="url(#amber)" fill="none" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+    <line x1="248" y1="205" x2="352" y2="205"/>
+    <polyline points="332,188 356,205 332,222"/>
+  </g>
+
+  <!-- install hint below the icons -->
+  <text x="300" y="352" text-anchor="middle" font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-size="14" fill="#8A9BBF">Drag <tspan fill="#DDE2F0" font-weight="600">EchoScribe</tspan> into your Applications folder</text>
+  <text x="300" y="374" text-anchor="middle" font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-size="11" fill="#4A5878">Then open it from Applications — not from this window</text>
+</svg>

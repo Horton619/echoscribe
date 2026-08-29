@@ -574,6 +574,58 @@ def run_probe(path, opts):
         _emit({"type": "probe_result", "ok": False, "error": str(e)})
 
 
+# ---------------------------------------------------------------------------
+# Model management — pre-cache both models for offline use
+#
+# The models download from Hugging Face on first use. For a laptop headed
+# somewhere with no wifi, the app offers a "download everything now" action
+# (settings → Diagnostics) plus a first-launch nudge. These two commands back
+# that UI. ffmpeg + mlx are bundled in the app itself — models are the only
+# runtime download, so "download all libraries" == cache these models.
+# ---------------------------------------------------------------------------
+
+MODELS = [
+    ("mlx-community/whisper-large-v3-turbo", "Turbo — fast"),
+    ("mlx-community/whisper-large-v3-mlx", "Large-v3 — max accuracy"),
+]
+
+
+def _model_cached(repo):
+    from huggingface_hub import snapshot_download
+    try:
+        snapshot_download(repo, local_files_only=True)
+        return True
+    except Exception:
+        return False
+
+
+def run_models_status():
+    _emit({"type": "models_status",
+           "models": [{"repo": r, "label": l, "cached": _model_cached(r)} for r, l in MODELS]})
+
+
+def run_download_models():
+    from huggingface_hub import snapshot_download
+    for r, l in MODELS:
+        if _model_cached(r):
+            _emit({"type": "model_download", "repo": r, "label": l, "state": "cached"})
+            continue
+        _emit({"type": "model_download", "repo": r, "label": l, "state": "downloading"})
+        try:
+            snapshot_download(r)
+            _emit({"type": "model_download", "repo": r, "label": l, "state": "done"})
+        except Exception as e:
+            _emit({"type": "model_download", "repo": r, "label": l, "state": "error", "message": str(e)})
+    _emit({"type": "models_done"})
+
+
+def _sample_path():
+    """Bundled verified smoke-test clip (public-domain JFK excerpt)."""
+    if getattr(sys, "frozen", False):
+        return os.path.join(sys._MEIPASS, "assets", "jfk.flac")
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "jfk.flac")
+
+
 def run_preflight(opts):
     results = {}
 
@@ -590,6 +642,25 @@ def run_preflight(opts):
         results["mlx_whisper"] = {"ok": True, "message": "mlx-whisper importable"}
     except Exception as e:
         results["mlx_whisper"] = {"ok": False, "message": str(e)}
+
+    # End-to-end smoke test: transcribe a known clip and check the result.
+    # Only runs when a model is already cached, so preflight never kicks off a
+    # multi-GB download or needs the network.
+    turbo = MODELS[0][0]
+    sample = _sample_path()
+    if not _model_cached(turbo):
+        results["smoke_test"] = {"ok": True, "message": "skipped — download a model first (Offline models, below)"}
+    elif not os.path.exists(sample):
+        results["smoke_test"] = {"ok": False, "message": f"sample clip missing: {sample}"}
+    else:
+        try:
+            text = (transcribe_chunk(sample, turbo, None, None).get("text") or "").strip()
+            low = text.lower()
+            ok = "country" in low and "americans" in low
+            results["smoke_test"] = {"ok": ok,
+                                     "message": f'"{text[:70]}…"' if ok else f"unexpected output: {text[:60]}"}
+        except Exception as e:
+            results["smoke_test"] = {"ok": False, "message": str(e)}
 
     _emit({"type": "preflight_result", "results": results})
 
@@ -633,12 +704,22 @@ def main():
                    help="report duration + chunk plan for one file, then exit")
     p.add_argument("--preflight", action="store_true",
                    help="check ffmpeg + mlx-whisper availability, then exit")
+    p.add_argument("--models-status", action="store_true",
+                   help="report which models are cached, then exit")
+    p.add_argument("--download-models", action="store_true",
+                   help="download all models for offline use, then exit")
     opts = p.parse_args()
 
     _ipc_mode = opts.ipc
 
     if opts.preflight:
         run_preflight(opts)
+        return
+    if opts.models_status:
+        run_models_status()
+        return
+    if opts.download_models:
+        run_download_models()
         return
     if opts.probe:
         run_probe(opts.probe, opts)

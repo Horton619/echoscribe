@@ -131,10 +131,11 @@ function log(level, msg) {
 // ---------------------------------------------------------------------------
 
 function resolvePythonBackend() {
-  // Packaged: PyInstaller binary (phase 2). Dev: null → venv python + script.
+  // Packaged: PyInstaller onedir bundle at resources/backend/transcribe/transcribe.
+  // Dev: null → venv python + script.
   if (app.isPackaged) {
     const exe = process.platform === 'win32' ? 'transcribe.exe' : 'transcribe';
-    return path.join(process.resourcesPath, 'backend', exe);
+    return path.join(process.resourcesPath, 'backend', 'transcribe', exe);
   }
   return null;
 }
@@ -506,6 +507,46 @@ ipcMain.on('transcription:jobDone', () => { currentJob = null; });
 
 // --- Preflight ---
 ipcMain.handle('preflight:run', () => { runPreflight(mainWindow); return true; });
+
+// --- Model management (pre-cache for offline use) ---
+ipcMain.handle('models:status', async () => {
+  return new Promise((resolve) => {
+    let output = '';
+    const proc = spawnBackend(['--models-status', '--ipc']);
+    proc.stdout.on('data', (d) => (output += d.toString()));
+    proc.stderr.on('data', (d) => log('warn', `models:status stderr: ${d.toString().trim()}`));
+    proc.on('close', () => {
+      for (const line of output.split('\n')) {
+        try { const m = JSON.parse(line.trim()); if (m.type === 'models_status') { resolve(m.models); return; } }
+        catch (_) {}
+      }
+      resolve(null);
+    });
+    proc.on('error', () => resolve(null));
+  });
+});
+
+let modelsProc = null;
+ipcMain.handle('models:download', () => {
+  if (modelsProc) return { ok: false, error: 'A download is already running.' };
+  modelsProc = spawnBackend(['--download-models', '--ipc']);
+  let buf = '';
+  const send = (payload) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('models:progress', payload); };
+  modelsProc.stdout.on('data', (chunk) => {
+    buf += chunk.toString('utf8');
+    let nl;
+    while ((nl = buf.indexOf('\n')) !== -1) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      try { send(JSON.parse(line)); } catch (_) {}
+    }
+  });
+  modelsProc.stderr.on('data', (d) => log('info', `models download: ${d.toString().trim()}`));
+  modelsProc.on('close', () => { modelsProc = null; send({ type: 'models_done' }); });
+  modelsProc.on('error', (err) => { modelsProc = null; send({ type: 'model_download', state: 'error', message: err.message }); });
+  return { ok: true };
+});
 
 // --- Log ---
 ipcMain.handle('log:getPath', () => global.logger ? global.logger.filePath : null);

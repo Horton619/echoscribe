@@ -63,6 +63,14 @@ contextBridge.exposeInMainWorld('echoscribe', {
   runPreflight: () => ipcRenderer.invoke('preflight:run'),
   onPreflightResult: makeListener('preflight:result'),
 
+  // --- Model management (pre-cache for offline use) ---
+  /** Returns [{repo, label, cached}] or null. */
+  getModelsStatus: () => ipcRenderer.invoke('models:status'),
+  /** Start downloading all models. Progress arrives via onModelsProgress. */
+  downloadModels: () => ipcRenderer.invoke('models:download'),
+  /** Fired per model: {type:'model_download', repo, label, state:'downloading'|'done'|'cached'|'error'} and {type:'models_done'}. */
+  onModelsProgress: makeListener('models:progress'),
+
   // --- Log ---
   getLogPath: () => ipcRenderer.invoke('log:getPath'),
   getLogTail: (n) => ipcRenderer.invoke('log:getTail', n || 100),

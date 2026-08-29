@@ -78,17 +78,32 @@ printf 'Electron.app/Contents/MacOS/Electron' > node_modules/electron/path.txt
 The shipped app won't hit this — it'll be Developer-ID signed + notarized
 (phase 2), which Gatekeeper accepts.
 
-## The model
+## The models & offline use
 
-First transcription downloads the model from Hugging Face (cached after):
+Models download from Hugging Face on first use, then cache:
 
 - `mlx-community/whisper-large-v3-turbo` — default, fast, great quality (~1.5 GB)
-- `mlx-community/whisper-large-v3` — max accuracy, slower (~3 GB)
+- `mlx-community/whisper-large-v3-mlx` — max accuracy, slower (~3 GB)
+
+**Going offline?** Settings → Diagnostics → **Download models for offline use**
+pre-caches both (~4.5 GB) so the app works with no wifi. A first-launch banner
+nudges you to do this while you still have a connection. ffmpeg and the mlx
+engine are built into the app — the models are the only runtime download.
+
+Preflight (Diagnostics) runs a real **transcription smoke test** on a bundled
+verified clip (JFK excerpt) when a model is cached — a true end-to-end check,
+not just an import test.
 
 ## Roadmap
 
-- **Phase 2** — PyInstaller backend binary + signed/notarized DMG + auto-update
-  (reuses the VEP recipe; the one open question is bundling `mlx` cleanly).
+- **Phase 2** — signed/notarized DMG + auto-update (reuses the VEP recipe).
+  - ✅ *Spike done:* the PyInstaller **onedir** backend (`backend/transcribe.spec`)
+    bundles mlx's Metal libs and runs real transcription frozen. Build with
+    `cd backend && ../venv/bin/pyinstaller --clean transcribe.spec`.
+  - ⏳ *Remaining:* vendor static `ffmpeg`/`ffprobe` into the app (dev still uses
+    Homebrew PATH), add the arm64 startup gate, wire `.github/workflows/release.yml`
+    on an arm64 runner (`macos-14`), decide model-delivery (bundle turbo vs
+    download-on-first-run).
 - **v2 diarization** — for *single-track* content that wasn't multitracked, a
   `whisperx-mlx` speaker pass (needs a HF token). The backend `merge()` seam is
   left uncoupled so this slots in without reshaping the pipeline. For live

@@ -16,6 +16,8 @@ const state = {
   settings: {},
   running: false,
   lastOutputDir: null,
+  models: [],
+  _modelPromptDismissed: false,
 };
 
 let _nextId = 1;
@@ -33,6 +35,7 @@ async function boot() {
   hydrateSettingsModal();
   wireEvents();
   renderAll();
+  loadModelsStatus();   // show first-launch download nudge if models aren't cached
 }
 
 function applySkin(skin) {
@@ -491,7 +494,7 @@ function reprobeAll() {
   state.queue.forEach((item) => { if (item.status !== 'error') probeItem(item); });
 }
 
-function openSettings() { $('settings-overlay').classList.remove('hidden'); }
+function openSettings() { $('settings-overlay').classList.remove('hidden'); loadModelsStatus(); }
 function closeSettings() { $('settings-overlay').classList.add('hidden'); }
 
 function switchSettingsTab(tab) {
@@ -507,7 +510,7 @@ function renderPreflight(results) {
   const el = $('preflight-results');
   el.innerHTML = '';
   if (!results) { el.textContent = 'Preflight failed to run.'; return; }
-  const labels = { ffmpeg: 'ffmpeg', mlx_whisper: 'mlx-whisper', output_folder: 'Output folder', disk_space: 'Disk space', app_version: 'App version' };
+  const labels = { ffmpeg: 'ffmpeg', mlx_whisper: 'mlx-whisper', smoke_test: 'Transcription test', output_folder: 'Output folder', disk_space: 'Disk space', app_version: 'App version' };
   for (const [key, r] of Object.entries(results)) {
     const row = document.createElement('div');
     row.className = 'preflight-check ' + (r.ok ? 'ok' : 'fail');
@@ -526,6 +529,68 @@ function renderPreflight(results) {
 async function refreshLog() {
   const lines = await api.getLogTail(120);
   $('log-tail').textContent = lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Offline models — pre-cache before going somewhere without wifi
+// ---------------------------------------------------------------------------
+
+async function loadModelsStatus() {
+  const models = await api.getModelsStatus();
+  if (!models) return;
+  state.models = models;
+  renderModelsList();
+  maybeShowModelPrompt();
+}
+
+function renderModelsList() {
+  const el = $('models-list');
+  if (!el) return;
+  el.innerHTML = '';
+  for (const m of (state.models || [])) {
+    const cls = m.state || (m.cached ? 'cached' : 'missing');
+    const icon = { cached: '✓', missing: '○', downloading: '◐', done: '✓', error: '✕' }[cls] || '○';
+    const label = { cached: 'Cached', missing: 'Not downloaded', downloading: 'Downloading…', done: 'Cached', error: 'Failed' }[cls] || '';
+    const row = document.createElement('div');
+    row.className = `model-row ${cls === 'done' ? 'cached' : cls}`;
+    row.innerHTML = `<span class="mr-icon">${icon}</span><span class="mr-label">${m.label}</span><span class="mr-state">${label}</span>`;
+    el.appendChild(row);
+  }
+}
+
+function allModelsCached() {
+  return (state.models || []).length > 0 && state.models.every((m) => m.cached || m.state === 'done' || m.state === 'cached');
+}
+
+function maybeShowModelPrompt() {
+  if (state._modelPromptDismissed) return;
+  $('model-prompt-banner').classList.toggle('hidden', allModelsCached());
+}
+
+async function startModelDownload() {
+  const btn = $('btn-download-models');
+  btn.disabled = true;
+  $('models-download-status').textContent = 'Downloading… this can take a while for ~4.5 GB. Leave the app open.';
+  state.models = (state.models || []).map((m) => m.cached ? m : { ...m, state: 'missing' });
+  renderModelsList();
+  const res = await api.downloadModels();
+  if (!res.ok) { $('models-download-status').textContent = res.error || 'Could not start download.'; btn.disabled = false; }
+}
+
+function handleModelsProgress(msg) {
+  if (msg.type === 'model_download') {
+    const m = (state.models || []).find((x) => x.repo === msg.repo);
+    if (m) {
+      m.state = msg.state;
+      if (msg.state === 'done' || msg.state === 'cached') m.cached = true;
+      renderModelsList();
+    }
+    if (msg.state === 'error') $('models-download-status').textContent = `Error: ${msg.message || 'download failed'}`;
+  } else if (msg.type === 'models_done') {
+    $('btn-download-models').disabled = false;
+    $('models-download-status').textContent = allModelsCached() ? 'All models cached — you’re ready for offline use.' : 'Some models did not download. Try again.';
+    maybeShowModelPrompt();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -607,6 +672,12 @@ function wireEvents() {
   $('settings-overlay').addEventListener('click', (e) => { if (e.target === $('settings-overlay')) closeSettings(); });
   document.querySelectorAll('.settings-tab').forEach((t) => t.addEventListener('click', () => switchSettingsTab(t.dataset.tab)));
   document.querySelectorAll('.skin-option').forEach((b) => b.addEventListener('click', () => { applySkin(b.dataset.skin); api.setSetting('skin', b.dataset.skin); state.settings.skin = b.dataset.skin; }));
+
+  // Offline models
+  $('btn-download-models').addEventListener('click', startModelDownload);
+  $('btn-model-prompt-download').addEventListener('click', () => { openSettings(); switchSettingsTab('diagnostics'); startModelDownload(); });
+  $('btn-model-prompt-dismiss').addEventListener('click', () => { state._modelPromptDismissed = true; $('model-prompt-banner').classList.add('hidden'); });
+  api.onModelsProgress(handleModelsProgress);
 
   // Diagnostics
   $('btn-run-preflight').addEventListener('click', () => { $('preflight-results').textContent = 'Running…'; api.runPreflight(); });

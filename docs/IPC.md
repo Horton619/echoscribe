@@ -28,7 +28,9 @@ Plus `src/preload.js` exposes the renderer-facing API (`window.echoscribe`).
 | `--per-speaker` | Also write each track's own transcript |
 | `--script-timestamps yes\|no` | `[HH:MM:SS]` prefixes in the merged script .txt (default yes) |
 | `--probe FILE` | One-shot: duration + chunk plan, then exit |
-| `--preflight` | One-shot: check ffmpeg + mlx-whisper, then exit |
+| `--preflight` | One-shot: check ffmpeg + mlx-whisper + transcription smoke test, then exit |
+| `--models-status` | One-shot: report which models are cached, then exit |
+| `--download-models` | Download all models for offline use (streams progress), then exit |
 
 ## NDJSON message types (backend → main → renderer)
 
@@ -42,7 +44,14 @@ Plus `src/preload.js` exposes the renderer-facing API (`window.echoscribe`).
 | `error` | file, message | per-file failure |
 | `batch_done` | transcribed, errors | end of the whole run |
 | `probe_result` | ok, duration, chunks | `--probe` only |
-| `preflight_result` | results{check:{ok,message}} | `--preflight` only |
+| `preflight_result` | results{check:{ok,message}} incl. `smoke_test` | `--preflight` only |
+| `models_status` | models[{repo,label,cached}] | `--models-status` only |
+| `model_download` | repo, label, state (downloading/done/cached/error) | `--download-models`, per model |
+| `models_done` | — | end of `--download-models` |
+
+`--preflight` runs a real transcription of a bundled verified clip
+(`backend/assets/jfk.flac`) as `smoke_test`, but only when a model is already
+cached — so preflight never triggers a multi-GB download or needs the network.
 
 ## Electron IPC channels
 

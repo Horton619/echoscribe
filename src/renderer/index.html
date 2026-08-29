@@ -46,6 +46,13 @@
     <!-- Left pane: drop zone + queue + progress + run button -->
     <section class="left-pane">
 
+      <div id="model-prompt-banner" class="reveal-banner model-prompt hidden" role="status" aria-live="polite">
+        <span class="rb-icon">&#10515;</span>
+        <span class="rb-text">Heading somewhere without wifi? Download the transcription models (~4.5&nbsp;GB) now so EchoScribe works fully offline.</span>
+        <button class="rb-action" id="btn-model-prompt-download">Download now</button>
+        <button class="rb-dismiss" id="btn-model-prompt-dismiss" aria-label="Dismiss">&#10005;</button>
+      </div>
+
       <div id="reveal-banner" class="reveal-banner hidden" role="status" aria-live="polite">
         <span class="rb-icon">&#10003;</span>
         <span class="rb-text" id="reveal-banner-text">Done.</span>
@@ -205,6 +212,16 @@
             <button class="btn-diag-secondary" id="btn-copy-preflight" style="display:none">Copy to Clipboard</button>
           </div>
           <div id="preflight-results"></div>
+
+          <div class="diag-log-section">
+            <div class="settings-section-label">Offline models</div>
+            <div class="settings-hint">ffmpeg and the transcription engine are built into EchoScribe. The Whisper models download once (~4.5&nbsp;GB total) and are cached. Download them here before heading somewhere without wifi.</div>
+            <div id="models-list" class="models-list"></div>
+            <div class="diag-actions">
+              <button class="btn-diag-primary" id="btn-download-models">Download models for offline use</button>
+            </div>
+            <div id="models-download-status" class="update-status-line"></div>
+          </div>
 
           <div class="diag-log-section">
             <div class="settings-section-label">Software updates</div>

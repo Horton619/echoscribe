@@ -73,7 +73,11 @@ class SettingsStore {
   save() {
     try {
       fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
-      fs.writeFileSync(this.filePath, JSON.stringify(this._data, null, 2), 'utf8');
+      // Atomic write: a crash mid-write must not truncate the JSON and silently
+      // reset every setting to defaults on next load.
+      const tmp = this.filePath + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify(this._data, null, 2), 'utf8');
+      fs.renameSync(tmp, this.filePath);
     } catch (e) {
       console.error('Settings save failed:', e.message);
     }
@@ -111,6 +115,9 @@ class Logger {
 
   _write(level, msg) {
     try {
+      // Rotate during long sessions, not only at startup, so the log can't grow
+      // unbounded before the next launch. Stat is cheap; throttle to every 50 writes.
+      if ((this._writes = (this._writes || 0) + 1) % 50 === 0) this._rotate();
       fs.appendFileSync(this.filePath, `[${new Date().toISOString()}] [${level}] ${msg}\n`, 'utf8');
     } catch (_) {}
   }
@@ -248,6 +255,11 @@ class TranscriptionJob {
 
     this.proc.on('close', (code, signal) => {
       log('info', `python exited: code=${code} signal=${signal}`);
+      // 'close' is the one event guaranteed to fire when the process ends, so
+      // it — not the renderer's jobDone — is the authority that clears the
+      // singleton. Without this, a cancel / window-close / clean-exit-without-
+      // batch_done strands currentJob and every future run says "already running".
+      if (currentJob === this) currentJob = null;
       this._send('transcription:exit', { code, signal, cancelled: this.cancelled });
       this.proc = null;
     });
@@ -286,9 +298,14 @@ function runPreflight(win) {
   if (ffmpegDir) args.push('--ffmpeg-path', ffmpegDir);   // report the bundled binary
   const proc = spawnBackend(args);
   let output = '';
+  let settled = false;
+  // The smoke test loads a model + transcribes, so allow generous time; but
+  // never hang the Diagnostics UI forever if the backend wedges.
+  const timer = setTimeout(() => { if (!settled) { try { proc.kill(); } catch (_) {} } }, 180000);
   proc.stdout.on('data', (d) => (output += d.toString()));
   proc.stderr.on('data', (d) => log('warn', `preflight stderr: ${d.toString().trim()}`));
   proc.on('close', (code) => {
+    settled = true; clearTimeout(timer);
     let results = null;
     for (const line of output.split('\n')) {
       try {
@@ -301,23 +318,29 @@ function runPreflight(win) {
       results.output_folder = checkOutputFolderWritable(outputDir);
       results.disk_space = checkDiskSpace(outputDir);
       results.app_version = { ok: true, message: `v${app.getVersion()} — ${process.platform} ${process.arch}` };
+      // Loud failure if the packaged app is missing its bundled ffmpeg.
+      if (app.isPackaged && !resolveFfmpegDir()) {
+        results.ffmpeg = { ok: false, message: 'bundled ffmpeg missing from app resources' };
+      }
     }
     if (win && !win.isDestroyed()) win.webContents.send('preflight:result', { results, exitCode: code });
   });
   proc.on('error', (err) => {
+    settled = true; clearTimeout(timer);
     if (win && !win.isDestroyed()) win.webContents.send('preflight:result', { results: null, error: err.message });
   });
 }
 
 function checkOutputFolderWritable(dir) {
   if (!dir) return { ok: false, message: 'No output folder configured' };
+  const testFile = path.join(dir, `.echoscribe_write_test_${process.pid}_${Math.random().toString(36).slice(2)}`);
   try {
-    const testFile = path.join(dir, `.echoscribe_write_test_${Date.now()}`);
     fs.writeFileSync(testFile, 'ok');
-    fs.unlinkSync(testFile);
     return { ok: true, message: dir };
   } catch (e) {
     return { ok: false, message: e.message };
+  } finally {
+    try { fs.unlinkSync(testFile); } catch (_) {}   // never leave a stray dotfile
   }
 }
 
@@ -362,7 +385,11 @@ function createWindow() {
   if (!app.isPackaged) mainWindow.webContents.openDevTools({ mode: 'detach' });
 
   mainWindow.on('closed', () => {
-    if (currentJob) currentJob.cancel();
+    // On macOS the app keeps running after the window closes; tear down any
+    // live child processes and clear the singleton so a reopened window isn't
+    // permanently locked out with "already running".
+    if (currentJob) { currentJob.cancel(); currentJob = null; }
+    if (modelsProc) { try { modelsProc.kill(); } catch (_) {} modelsProc = null; }
     mainWindow = null;
   });
 
@@ -398,7 +425,11 @@ app.whenReady().then(() => {
   });
 });
 
-app.on('will-quit', () => { if (global.logger) global.logger.info('App quitting'); });
+app.on('will-quit', () => {
+  if (currentJob) { try { currentJob.cancel(); } catch (_) {} }
+  if (modelsProc) { try { modelsProc.kill(); } catch (_) {} }
+  if (global.logger) global.logger.info('App quitting');
+});
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 
 // ---------------------------------------------------------------------------
@@ -485,19 +516,24 @@ ipcMain.handle('media:probe', async (e, filePath, chunkLength, overlap) => {
   if (ffmpegDir) args.push('--ffmpeg-path', ffmpegDir);
   return new Promise((resolve) => {
     let output = '';
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; clearTimeout(timer); resolve(v); } };
     const proc = spawnBackend(args);
+    const timer = setTimeout(() => { try { proc.kill(); } catch (_) {} finish({ ok: false, error: 'Probe timed out' }); }, 20000);
     proc.stdout.on('data', (d) => (output += d.toString()));
     proc.stderr.on('data', (d) => log('warn', `probe stderr: ${d.toString().trim()}`));
     proc.on('close', () => {
+      let backendError = null;
       for (const line of output.split('\n')) {
         try {
           const msg = JSON.parse(line.trim());
-          if (msg.type === 'probe_result') { resolve(msg); return; }
+          if (msg.type === 'probe_result') { finish(msg); return; }
+          if (msg.type === 'error') backendError = msg.message;   // surface the real reason
         } catch (_) {}
       }
-      resolve({ ok: false, error: 'No probe_result from backend' });
+      finish({ ok: false, error: backendError || 'Could not read media' });
     });
-    proc.on('error', (err) => resolve({ ok: false, error: err.message }));
+    proc.on('error', (err) => finish({ ok: false, error: err.message }));
   });
 });
 
@@ -507,31 +543,45 @@ ipcMain.handle('transcription:start', async (e, payload) => {
   const {
     files, outputDir, model, chunkLength, overlap, vocabHint, language, formats,
     multitrack, speakers, sessionName, perSpeaker, scriptTimestamps,
-  } = payload;
+  } = payload || {};
+
+  // Validate at the IPC boundary — a malformed payload must not throw (which
+  // would reject the invoke and strand the singleton).
+  if (!Array.isArray(files) || files.length === 0) return { ok: false, error: 'No files to transcribe.' };
+  if (!outputDir) return { ok: false, error: 'No output folder set.' };
 
   const folderCheck = checkOutputFolderWritable(outputDir);
   if (!folderCheck.ok) return { ok: false, error: `Output folder not writable: ${folderCheck.message}` };
 
-  currentJob = new TranscriptionJob({
-    files, outputDir, model,
-    chunkLength: chunkLength ?? 1200,
-    overlap: overlap ?? 10,
-    vocabHint: vocabHint || '',
-    language: language || '',
-    formats: formats || 'txt,srt',
-    multitrack: !!multitrack,
-    speakers: speakers || [],
-    sessionName: sessionName || 'session',
-    perSpeaker: perSpeaker !== false,
-    scriptTimestamps: scriptTimestamps !== false,
-    win: mainWindow,
-  });
-  currentJob.start();
+  try {
+    currentJob = new TranscriptionJob({
+      files, outputDir, model,
+      chunkLength: chunkLength ?? 1200,
+      overlap: overlap ?? 10,
+      vocabHint: vocabHint || '',
+      language: language || '',
+      formats: formats || 'txt,srt',
+      multitrack: !!multitrack,
+      speakers: speakers || [],
+      sessionName: sessionName || 'session',
+      perSpeaker: perSpeaker !== false,
+      scriptTimestamps: scriptTimestamps !== false,
+      win: mainWindow,
+    });
+    currentJob.start();
+  } catch (err) {
+    currentJob = null;
+    return { ok: false, error: err.message };
+  }
   return { ok: true };
 });
 
 ipcMain.handle('transcription:cancel', () => {
-  if (currentJob) { currentJob.cancel(); currentJob = null; return true; }
+  // Don't null currentJob here — the process is only SIGTERM'd and keeps
+  // running briefly; the 'close' handler is the single place that clears it.
+  // Nulling now would let a second backend spawn on the same files while the
+  // first is still shutting down.
+  if (currentJob) { currentJob.cancel(); return true; }
   return false;
 });
 
@@ -544,17 +594,20 @@ ipcMain.handle('preflight:run', () => { runPreflight(mainWindow); return true; }
 ipcMain.handle('models:status', async () => {
   return new Promise((resolve) => {
     let output = '';
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; clearTimeout(timer); resolve(v); } };
     const proc = spawnBackend(['--models-status', '--ipc']);
+    const timer = setTimeout(() => { try { proc.kill(); } catch (_) {} finish(null); }, 20000);
     proc.stdout.on('data', (d) => (output += d.toString()));
     proc.stderr.on('data', (d) => log('warn', `models:status stderr: ${d.toString().trim()}`));
     proc.on('close', () => {
       for (const line of output.split('\n')) {
-        try { const m = JSON.parse(line.trim()); if (m.type === 'models_status') { resolve(m.models); return; } }
+        try { const m = JSON.parse(line.trim()); if (m.type === 'models_status') { finish(m.models); return; } }
         catch (_) {}
       }
-      resolve(null);
+      finish(null);
     });
-    proc.on('error', () => resolve(null));
+    proc.on('error', () => finish(null));
   });
 });
 

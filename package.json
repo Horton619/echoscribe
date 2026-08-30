@@ -1,6 +1,6 @@
 {
   "name": "echoscribe",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Local audio/video → text transcription for Apple Silicon (mlx-whisper) — Visual Entropy Productions",
   "author": "Visual Entropy Productions",
   "main": "src/main.js",

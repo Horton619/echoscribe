@@ -15,9 +15,12 @@ const state = {
   queue: [],                // { id, path, name, speaker, status, duration, chunks }
   settings: {},
   running: false,
+  starting: false,          // true during the start IPC round-trip (double-run guard)
+  runIds: null,             // Set of queue ids submitted in the current run
   lastOutputDir: null,
   models: [],
   _modelPromptDismissed: false,
+  _updateToastDismissed: false,
 };
 
 let _nextId = 1;
@@ -133,17 +136,16 @@ async function addPaths(paths) {
     state.queue.push(item);
     probeItem(item);
   }
-  if (skipped && skipped.length) showDropReject(skipped);
-  else if (overflow) showDropMessage(`Multitrack takes at most ${MAX_TRACKS} tracks — extra files were not added.`);
+  const parts = [];
+  if (skipped && skipped.length) {
+    const names = skipped.slice(0, 3).join(', ') + (skipped.length > 3 ? `, +${skipped.length - 3} more` : '');
+    parts.push(`Not an audio or video file: ${names}. EchoScribe takes audio and video — mp3, wav, m4a, mp4, mov, and more. Video is fine; the audio is pulled out automatically.`);
+  }
+  if (overflow) parts.push(`Multitrack takes at most ${MAX_TRACKS} tracks — extra files were not added.`);
+  if (parts.length) showDropMessage(parts.join(' '));
   renderQueue();
   updatePlan();
   updateRunButton();
-}
-
-function showDropReject(skipped) {
-  const n = skipped.length;
-  const names = skipped.slice(0, 3).join(', ') + (n > 3 ? `, +${n - 3} more` : '');
-  showDropMessage(`Not an audio or video file: ${names}. EchoScribe takes audio and video — mp3, wav, m4a, mp4, mov, and more. Video is fine; the audio is pulled out automatically.`);
 }
 
 function showDropMessage(text) {
@@ -205,6 +207,13 @@ function statusIcon(item) {
 
 function renderQueue() {
   const list = $('queue-list');
+  // Preserve focus + caret if a speaker input is being typed into — an async
+  // probe resolving mid-typing must not steal the caret and drop keystrokes.
+  const active = document.activeElement;
+  let focusId = null, caret = null;
+  if (active && active.classList && active.classList.contains('speaker-input')) {
+    focusId = active.dataset.itemId; caret = active.selectionStart;
+  }
   list.innerHTML = '';
   const mt = state.mode === 'multitrack';
   for (const item of state.queue) {
@@ -223,6 +232,7 @@ function renderQueue() {
       spk.placeholder = 'Speaker name';
       spk.value = item.speaker || '';
       spk.disabled = state.running;
+      spk.dataset.itemId = item.id;
       spk.addEventListener('input', () => { item.speaker = spk.value; updateRunButton(); });
       el.appendChild(spk);
     }
@@ -264,6 +274,11 @@ function renderQueue() {
       el.appendChild(rm);
     }
     list.appendChild(el);
+  }
+
+  if (focusId != null) {
+    const again = list.querySelector(`.speaker-input[data-item-id="${focusId}"]`);
+    if (again) { again.focus(); if (caret != null) try { again.setSelectionRange(caret, caret); } catch (_) {} }
   }
 
   const anyDone = state.queue.some((q) => q.status === 'done');
@@ -310,11 +325,13 @@ function multitrackReady() {
 function updateRunButton() {
   const btn = $('btn-run');
   if (state.running) { btn.disabled = false; return; }
+  if (state.starting) { btn.disabled = true; return; }
   const hasFolder = !!state.settings.outputDir;
-  const hasFiles = state.queue.length > 0 && state.queue.every((q) => q.status !== 'error' || true);
   const hasFormat = selectedFormats().length > 0;
-  const okReady = state.queue.some((q) => q.status === 'queued' || q.status === 'done');
-  let ready = hasFolder && hasFiles && hasFormat && okReady;
+  // Only queued items make the button actionable — an all-done queue must not
+  // leave an enabled-but-inert button.
+  const okReady = state.queue.some((q) => q.status === 'queued');
+  let ready = hasFolder && hasFormat && okReady;
   if (state.mode === 'multitrack') ready = ready && multitrackReady();
   btn.disabled = !ready;
 }
@@ -325,6 +342,7 @@ function updateRunButton() {
 
 async function run() {
   if (state.running) { api.cancelTranscription(); return; }
+  if (state.starting) return;   // guard the IPC round-trip against a double-click
 
   const formats = selectedFormats().join(',');
   const pending = state.queue.filter((q) => q.status === 'queued');
@@ -348,10 +366,17 @@ async function run() {
     payload.scriptTimestamps = $('script-timestamps').checked;
   }
 
-  const res = await api.startTranscription(payload);
-  if (!res.ok) { showError(res.error); return; }
+  state.starting = true;
+  $('btn-run').disabled = true;
+  let res;
+  try { res = await api.startTranscription(payload); }
+  catch (err) { res = { ok: false, error: err && err.message ? err.message : 'Failed to start' }; }
+  finally { state.starting = false; }
+
+  if (!res || !res.ok) { updateRunButton(); showError(res ? res.error : 'Failed to start'); return; }
 
   state.running = true;
+  state.runIds = new Set(pending.map((q) => q.id));   // scope progress % to this run
   pending.forEach((q) => { q.status = 'queued'; q.pct = null; });
   enterRunningUI();
 }
@@ -388,9 +413,16 @@ function setProgress(pct, overall, status) {
 // Backend messages
 // ---------------------------------------------------------------------------
 
-function itemByName(name) {
-  return state.queue.find((q) => q.name === name)
-      || state.queue.find((q) => q.name.replace(/\.[^.]+$/, '') === name);
+function itemForMsg(msg) {
+  // Route by the exact input path the backend echoes (unique), so two files
+  // with the same basename don't both resolve to the first queue item. Fall
+  // back to basename only for older messages without file_path.
+  if (msg.file_path) {
+    const byPath = state.queue.find((q) => q.path === msg.file_path);
+    if (byPath) return byPath;
+  }
+  return state.queue.find((q) => q.name === msg.file)
+      || state.queue.find((q) => q.name.replace(/\.[^.]+$/, '') === msg.file);
 }
 
 function handleMessage(msg) {
@@ -402,7 +434,7 @@ function handleMessage(msg) {
         state.queue.forEach((q) => { q.status = 'active'; });
         setProgress(0, `Transcribing ${msg.tracks} tracks → one script`, '');
       } else {
-        const it = itemByName(msg.file);
+        const it = itemForMsg(msg);
         if (it) { it.status = 'active'; it.pct = 0; }
         setProgress(overallPct(), `File ${msg.file_index}/${msg.total_files}`, msg.file);
       }
@@ -412,9 +444,10 @@ function handleMessage(msg) {
     case 'progress': {
       if (state.mode === 'multitrack') {
         setProgress(msg.percent || 0, 'Transcribing session', msg.message || '');
-        state.queue.forEach((q) => { if ((q.speaker || '').trim() === msg.file) q.status = 'active'; });
+        const spk = (msg.file || '').trim().toLowerCase();
+        state.queue.forEach((q) => { if ((q.speaker || '').trim().toLowerCase() === spk) q.status = 'active'; });
       } else {
-        const it = itemByName(msg.file);
+        const it = itemForMsg(msg);
         if (it) { it.status = 'active'; it.pct = msg.percent ?? it.pct; }
         setProgress(overallPct(), $('progress-overall-text').textContent, `${msg.file} — ${msg.message || ''}`);
       }
@@ -428,7 +461,7 @@ function handleMessage(msg) {
       if (msg.multitrack) {
         state.queue.forEach((q) => { q.status = 'done'; q.outputs = msg.outputs; });
       } else {
-        const it = itemByName(msg.file);
+        const it = itemForMsg(msg);
         if (it) { it.status = 'done'; it.pct = 100; it.outputs = msg.outputs; }
       }
       setProgress(overallPct(), $('progress-overall-text').textContent, `✓ ${msg.file}`);
@@ -436,7 +469,7 @@ function handleMessage(msg) {
       break;
     }
     case 'error': {
-      const it = itemByName(msg.file);
+      const it = itemForMsg(msg);
       if (it) { it.status = 'error'; it.error = msg.message; }
       else showError(msg.message);
       renderQueue();
@@ -450,16 +483,23 @@ function handleMessage(msg) {
 }
 
 function overallPct() {
-  if (!state.queue.length) return 0;
+  // Scope to the items actually submitted this run, so a file that errored
+  // (stuck at 0) or leftover done items from a prior batch don't skew the bar.
+  const items = state.runIds
+    ? state.queue.filter((q) => state.runIds.has(q.id))
+    : state.queue;
+  if (!items.length) return 0;
   let sum = 0;
-  for (const q of state.queue) {
+  for (const q of items) {
     if (q.status === 'done') sum += 100;
     else if (q.status === 'active') sum += (q.pct || 0);
+    else if (q.status === 'error') sum += 100;   // count as resolved, not stuck
   }
-  return Math.round(sum / state.queue.length);
+  return Math.round(sum / items.length);
 }
 
 function finishBatch(msg) {
+  state.runIds = null;
   exitRunningUI();
   $('progress-section').classList.remove('active');
   api.notifyJobDone();
@@ -506,6 +546,7 @@ function clampNum(v, min, max, dflt) {
 }
 
 function reprobeAll() {
+  if (state.running) return;   // never re-probe (and possibly error-flip) an in-flight item
   state.queue.forEach((item) => { if (item.status !== 'error') probeItem(item); });
 }
 
@@ -559,7 +600,7 @@ async function loadModelsStatus() {
 }
 
 function fmtGB(bytes) {
-  if (!bytes) return '';
+  if (bytes == null) return '';   // 0 should render "0 MB", not an empty ratio
   const gb = bytes / 1073741824;
   return gb >= 1 ? `${gb.toFixed(1)} GB` : `${Math.round(bytes / 1048576)} MB`;
 }
@@ -649,18 +690,21 @@ function handleUpdateStatus(p) {
       break;
     case 'downloading':
       line.textContent = `Downloading v${p.version}… ${p.percent}%`;
-      toast.classList.remove('hidden');
+      $('btn-download-update').style.display = 'none';   // superseded by the toast
+      if (!state._updateToastDismissed) toast.classList.remove('hidden');   // respect a manual dismiss
       $('update-toast-label').textContent = `Downloading EchoScribe v${p.version}…`;
       $('update-toast-percent').textContent = `${p.percent}%`;
       $('update-toast-fill').style.width = `${p.percent}%`;
       break;
     case 'ready':
       line.textContent = `v${p.version} ready — restart to install.`;
+      $('btn-download-update').style.display = 'none';
       $('btn-install-update').style.display = '';
       $('update-toast-label').textContent = `v${p.version} ready.`;
       $('update-toast-percent').textContent = '';
       $('update-toast-action').style.display = '';
       $('update-toast-fill').style.width = '100%';
+      state._updateToastDismissed = false;   // "ready" is important enough to re-show
       toast.classList.remove('hidden');
       break;
     case 'error': line.textContent = `Update error: ${p.message}`; break;
@@ -729,14 +773,26 @@ function wireEvents() {
   $('btn-download-update').addEventListener('click', () => api.downloadUpdate());
   $('btn-install-update').addEventListener('click', () => api.installUpdate());
   $('update-toast-action').addEventListener('click', () => api.installUpdate());
-  $('update-toast-dismiss').addEventListener('click', () => $('update-toast').classList.add('hidden'));
+  $('update-toast-dismiss').addEventListener('click', () => { state._updateToastDismissed = true; $('update-toast').classList.add('hidden'); });
 
   // Esc closes settings
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSettings(); });
 
   // Backend subscriptions
   api.onTranscriptionMessage(handleMessage);
-  api.onTranscriptionExit((p) => { if (state.running && !p.cancelled && p.code !== 0) { showError(`Backend exited (code ${p.code}).`); exitRunningUI(); api.notifyJobDone(); } });
+  api.onTranscriptionExit((p) => {
+    // If a normal batch_done already reset the UI, state.running is false and
+    // we do nothing. Otherwise the job ended without batch_done (cancel, or a
+    // clean/error exit) — treat the exit as terminal so the UI can never stay
+    // stuck on "Cancel" requiring a relaunch.
+    if (!state.running) return;
+    if (p.cancelled) $('progress-status-text').textContent = 'Cancelled.';
+    else if (p.code !== 0) showError(`Backend exited (code ${p.code}).`);
+    state.runIds = null;
+    exitRunningUI();
+    $('progress-section').classList.remove('active');
+    api.notifyJobDone();
+  });
   api.onTranscriptionSpawnError((p) => { showError(`Could not start backend: ${p.message}`); exitRunningUI(); api.notifyJobDone(); });
   api.onPreflightResult((p) => renderPreflight(p.results));
   api.onUpdateStatus(handleUpdateStatus);

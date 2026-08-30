@@ -160,26 +160,29 @@ def transcribe_chunk(wav_path, model_id, initial_prompt, language):
 def merge(chunk_results, overlap: float):
     """
     chunk_results: list of (global_start, whisper_result) in order.
-    Offset each chunk's local segment times by its global_start, then stitch:
-    at each seam keep the earlier chunk's segments up to the overlap midpoint
-    and the later chunk's from the midpoint on. Returns [{start,end,text}].
+    Offset each chunk's local segment times by its global_start, then assign
+    each segment to exactly one chunk by which side of the seam its MIDPOINT
+    falls on. Each chunk owns the global span [lo, hi): lo is the midpoint of
+    its overlap with the previous chunk (−inf for the first), hi the midpoint of
+    its overlap with the next (+inf for the last). The windows are contiguous, so
+    every segment lands in exactly one — no seam gaps (dropped words) and no
+    double-counting (duplicated words), which start-only filtering caused.
+    Returns [{start,end,text}].
     """
     merged = []
+    n = len(chunk_results)
     for i, (gstart, result) in enumerate(chunk_results):
-        segs = result.get("segments") or []
-        for s in segs:
-            seg = {
-                "start": float(s["start"]) + gstart,
-                "end": float(s["end"]) + gstart,
-                "text": s["text"].strip(),
-            }
-            if i > 0:
-                # Seam is the midpoint of this chunk's overlap with the previous.
-                boundary = gstart + overlap / 2.0
-                if seg["start"] < boundary:
-                    continue
-            if seg["text"]:
-                merged.append(seg)
+        lo = (gstart + overlap / 2.0) if i > 0 else float("-inf")
+        hi = (chunk_results[i + 1][0] + overlap / 2.0) if i < n - 1 else float("inf")
+        for s in result.get("segments") or []:
+            start = float(s["start"]) + gstart
+            end = float(s["end"]) + gstart
+            mid = (start + end) / 2.0
+            if not (lo <= mid < hi):
+                continue
+            text = s["text"].strip()
+            if text:
+                merged.append({"start": start, "end": end, "text": text})
     return merged
 
 
@@ -200,15 +203,12 @@ def _atomic_write(path, text):
 
 
 def _srt_ts(t: float) -> str:
-    if t < 0:
-        t = 0.0
-    h = int(t // 3600)
-    m = int((t % 3600) // 60)
-    s = int(t % 60)
-    ms = int(round((t - int(t)) * 1000))
-    if ms == 1000:
-        ms = 0
-        s += 1
+    # Derive h/m/s/ms from a single rounded-millisecond integer so rollover
+    # carries correctly (no invalid ":60" fields, which strict SRT players reject).
+    total_ms = max(0, int(round(t * 1000)))
+    h, rem = divmod(total_ms, 3_600_000)
+    m, rem = divmod(rem, 60_000)
+    s, ms = divmod(rem, 1000)
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
@@ -236,16 +236,20 @@ def process_file(path, file_index, total_files, opts):
     ffprobe_bin = _ffbin("ffprobe", opts.ffmpeg_path)
 
     duration = ffprobe_duration(path, ffprobe_bin)
+    if duration <= 0:
+        raise RuntimeError("media has no readable duration")
     chunks = plan_chunks(duration, opts.chunk_length, opts.overlap)
-    _emit({"type": "media_info", "file": name, "duration": duration, "chunks": len(chunks)})
-    _emit({"type": "start", "file": name, "file_index": file_index, "total_files": total_files})
+    # file_path echoes the exact input path so the UI routes messages to the
+    # right queue item even when two files share a basename.
+    _emit({"type": "media_info", "file": name, "file_path": path, "duration": duration, "chunks": len(chunks)})
+    _emit({"type": "start", "file": name, "file_path": path, "file_index": file_index, "total_files": total_files})
 
     tmpdir = tempfile.mkdtemp(prefix="echoscribe_")
     chunk_results = []
     try:
         for (idx, gstart, dur) in chunks:
             _emit({
-                "type": "progress", "file": name,
+                "type": "progress", "file": name, "file_path": path,
                 "chunk": idx + 1, "total_chunks": len(chunks),
                 "percent": round(100 * gstart / duration) if duration else 0,
                 "message": f"transcribing {int(gstart)//60}:{int(gstart)%60:02d}…",
@@ -274,7 +278,7 @@ def process_file(path, file_index, total_files, opts):
 
         lang = chunk_results[0][1].get("language") if chunk_results else None
         _emit({
-            "type": "done", "file": name, "outputs": outputs,
+            "type": "done", "file": name, "file_path": path, "outputs": outputs,
             "segments": len(segments), "duration": duration,
             "chunks": len(chunks), "language": lang, "output_dir": out_dir,
         })
@@ -377,9 +381,11 @@ def apply_gate(audio, gate_blocks):
     import numpy as np
     mask = np.repeat(gate_blocks, _GATE_BLOCK)
     n = min(len(audio), len(mask))
-    out = np.zeros(len(audio), dtype=audio.dtype)
-    out[:n] = audio[:n] * mask[:n]
-    return out
+    # Gate in place — avoids a second full-length allocation (~0.5GB on a long
+    # track); we own `audio` and don't reuse it after gating.
+    audio[:n] *= mask[:n].astype(audio.dtype)
+    audio[n:] = 0
+    return audio
 
 
 def chunk_and_transcribe_array(audio, opts, progress_cb=None):
@@ -642,6 +648,8 @@ def run_download_models():
 
         def poll(repo=r, label=l, blobs=blobs, total=total):
             while not stop.wait(0.6):
+                if stop.is_set():   # don't emit a stray 'downloading' after 'done'
+                    return
                 done = _dir_size(blobs) if os.path.isdir(blobs) else 0
                 pct = min(99, round(100 * done / total)) if total else 0
                 _emit({"type": "model_download", "repo": repo, "label": label,
@@ -752,6 +760,13 @@ def main():
 
     _ipc_mode = opts.ipc
 
+    # Guard a flag combo that would otherwise floor the chunk step at 1s and
+    # explode a long file into thousands of chunks (a multi-hour hang).
+    if opts.overlap >= opts.chunk_length:
+        clamped = opts.chunk_length / 2.0
+        _warn(f"overlap ({opts.overlap}s) >= chunk length ({opts.chunk_length}s); clamping overlap to {clamped}s")
+        opts.overlap = clamped
+
     if opts.preflight:
         run_preflight(opts)
         return
@@ -767,9 +782,11 @@ def main():
 
     if opts.multitrack:
         opts.script_timestamps = (opts.script_timestamps == "yes")
-        speakers = json.loads(opts.speakers) if opts.speakers else \
-            [os.path.splitext(os.path.basename(f))[0] for f in opts.inputs]
         try:
+            # json.loads is inside the try so malformed --speakers reports an
+            # error + batch_done instead of crashing with no NDJSON (hung UI).
+            speakers = json.loads(opts.speakers) if opts.speakers else \
+                [os.path.splitext(os.path.basename(f))[0] for f in opts.inputs]
             process_multitrack(opts.inputs, speakers, opts)
         except Exception as e:
             _emit({"type": "error", "file": opts.session_name, "message": str(e)})
@@ -784,7 +801,7 @@ def main():
                 transcribed += 1
         except Exception as e:
             errors += 1
-            _emit({"type": "error", "file": os.path.basename(path), "message": str(e)})
+            _emit({"type": "error", "file": os.path.basename(path), "file_path": path, "message": str(e)})
 
     _emit({"type": "batch_done", "transcribed": transcribed, "errors": errors})
 

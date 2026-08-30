@@ -56,18 +56,18 @@ jobs:
       - name: Install Node dependencies
         run: npm ci
 
-      # electron-builder produces the signed+notarized .app, the ZIP, and
-      # latest-mac.yml (the auto-update chain). No dmg target — we build a
-      # nicer one below. The .app is stapled here, so the DMG opens cleanly.
-      - name: Build app + zip, sign, notarize, publish
+      # Build + sign + notarize LOCALLY (no publish yet). electron-builder emits
+      # the signed+notarized .app, the ZIP, and latest-mac.yml (the auto-update
+      # chain) into dist/. Notarization runs at afterSign, so it still happens.
+      # Publishing is deferred so a DMG failure can't leave a zip-only release.
+      - name: Build app + zip, sign, notarize (no publish)
         env:
-          GH_TOKEN:                    ${{ secrets.GITHUB_TOKEN }}
           CSC_LINK:                    ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD:            ${{ secrets.CSC_KEY_PASSWORD }}
           APPLE_ID:                    ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID:               ${{ secrets.APPLE_TEAM_ID }}
-        run: npx electron-builder --mac --publish always
+        run: npx electron-builder --mac --publish never
 
       # Build the branded installer DMG natively on the arm64 runner via appdmg.
       # electron-builder forces APFS on Apple Silicon, and Finder won't render a
@@ -76,13 +76,38 @@ jobs:
       - name: Build branded HFS+ DMG (appdmg)
         run: |
           VERSION=$(node -p "require('./package.json').version")
-          DMG="dist/EchoScribe-${VERSION}-arm64.dmg"
-          npx --yes appdmg build/appdmg.json "$DMG"
-          echo "DMG_PATH=$DMG" >> "$GITHUB_ENV"
+          npx --yes appdmg build/appdmg.json "dist/EchoScribe-${VERSION}-arm64.dmg"
 
-      - name: Upload branded DMG to the release
+      # Fail the job BEFORE publishing if any required artifact is missing, so we
+      # never ship an incomplete release.
+      - name: Verify all release artifacts exist
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          ls -la dist
+          for f in \
+            "dist/EchoScribe-${VERSION}-arm64.dmg" \
+            "dist/EchoScribe-${VERSION}-arm64-mac.zip" \
+            "dist/latest-mac.yml" ; do
+            test -f "$f" || { echo "MISSING artifact: $f"; exit 1; }
+          done
+
+      # Publish everything to the release in one shot, now that all artifacts
+      # exist. Create the release for the pushed tag; fall back to upload if a
+      # re-run finds it already there.
+      - name: Publish GitHub release with all artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG=${GITHUB_REF#refs/tags/}
-          gh release upload "$TAG" "$DMG_PATH" --repo ${{ github.repository }} --clobber
+          VERSION=$(node -p "require('./package.json').version")
+          ASSETS=(
+            "dist/EchoScribe-${VERSION}-arm64.dmg"
+            "dist/EchoScribe-${VERSION}-arm64-mac.zip"
+            "dist/EchoScribe-${VERSION}-arm64-mac.zip.blockmap"
+            "dist/latest-mac.yml"
+          )
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${ASSETS[@]}" --repo "${{ github.repository }}" --clobber
+          else
+            gh release create "$TAG" "${ASSETS[@]}" --repo "${{ github.repository }}" --title "$TAG" --notes "EchoScribe $TAG" --latest
+          fi

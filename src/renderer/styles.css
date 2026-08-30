@@ -351,3 +351,93 @@ main {
 .settings-footer button, .settings-done { background: var(--accent); border: none; color: #1a1204; font-weight: 600; padding: 7px 18px; border-radius: var(--radius-sm); cursor: pointer; font-size: 12px; }
 
 .hidden { display: none !important; }
+
+/* ===========================================================================
+   Interaction polish (v0.1.7) — snappy, responsive, unambiguous
+   =========================================================================== */
+
+/* Every interactive control: pointer cursor + fast transition + a visible
+   pressed state so a click feels registered before the async result lands. */
+button:not(:disabled), .skin-option, label.check-label, label.radio-label, .toggle-label,
+.output-folder-path, a.footer-link { cursor: pointer; }
+button { transition: background .12s ease, color .12s ease, border-color .12s ease, transform .06s ease, box-shadow .12s ease; }
+button:not(:disabled):active { transform: translateY(1px); }
+button:disabled { cursor: not-allowed; }
+
+/* Keyboard focus clarity (doesn't show on mouse click). */
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible,
+.skin-option:focus-visible, .check-label input:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+
+/* Hover states for the elements that were missing them. */
+.qi-done-link:hover { color: var(--accent); text-decoration: underline; }
+.qi-remove:active, .rb-dismiss:active, .dr-dismiss:active, .cb-dismiss:active,
+.update-toast-dismiss:active { transform: translateY(1px); }
+.rb-action:hover, .update-toast-action:hover { filter: brightness(1.08); }
+.rb-dismiss:hover, .dr-dismiss:hover, .update-toast-dismiss:hover { color: var(--text); }
+.skin-option:hover { border-color: var(--accent); }
+.settings-tab:active, .mode-tab:not(.active):active { transform: translateY(1px); }
+
+/* Queue rows feel alive on hover. */
+.queue-item { transition: border-color .15s ease, background .12s ease, box-shadow .12s ease; }
+.queue-item:hover { background: var(--surface-2); }
+
+/* Run button: pressed + a subtle glow on the primary CTA. */
+.btn-run:not(:disabled):hover { box-shadow: 0 3px 14px rgba(255,181,71,.28); }
+.btn-run:not(:disabled):active { transform: translateY(1px); box-shadow: none; }
+
+/* "Why is Run disabled?" live hint. */
+.run-hint {
+  flex-shrink: 0; min-height: 15px; margin-top: -4px; text-align: center;
+  font-size: 11px; color: var(--text-muted); transition: color .15s ease;
+}
+.run-hint.ready { color: var(--success); }
+
+/* ---- Progress: never look frozen ---- */
+.progress-overall { display: flex; align-items: center; gap: 7px; }
+.progress-elapsed { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--text-muted); font-size: 10.5px; }
+.progress-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); flex-shrink: 0;
+}
+#progress-section.active .progress-dot { background: var(--accent); animation: pulse-dot 1.1s ease-in-out infinite; }
+
+/* Shimmer sweeps across the accent fill while it has width. */
+.progress-bar-fill.working {
+  background-image: linear-gradient(90deg, transparent, rgba(255,255,255,.4), transparent);
+  background-size: 200% 100%;
+  animation: shimmer 1.2s linear infinite;
+}
+/* Indeterminate sweep on the whole track when there's no % to show yet
+   (model load, first chunk) — so the bar reads as working, not stuck. */
+.progress-bar-wrap { position: relative; overflow: hidden; }
+.progress-bar-wrap.indeterminate::after {
+  content: ''; position: absolute; top: 0; bottom: 0; width: 35%; left: -35%;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  animation: indeterminate 1.15s ease-in-out infinite;
+}
+
+/* Analyzing (probe pending) state on a queue item. */
+.qi-meta.analyzing { color: var(--accent); animation: pulse-text 1.1s ease-in-out infinite; }
+
+/* Micro-confirmation flash on fire-and-forget buttons. */
+button.flash-ok { background: var(--success) !important; color: #04120c !important; border-color: var(--success) !important; }
+
+/* Entrance animation for banners + toast. */
+.reveal-banner:not(.hidden), .drop-reject-banner:not(.hidden), .update-toast:not(.hidden) {
+  animation: slide-in .22s ease both;
+}
+
+@keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+@keyframes indeterminate { 0% { left: -35%; } 100% { left: 100%; } }
+@keyframes pulse-dot { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: .4; transform: scale(.7); } }
+@keyframes pulse-text { 0%,100% { opacity: 1; } 50% { opacity: .45; } }
+@keyframes slide-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+
+/* Respect reduced-motion — kill the looping/entrance animations, keep states. */
+@media (prefers-reduced-motion: reduce) {
+  .progress-bar-fill.working, .progress-bar-wrap.indeterminate::after,
+  #progress-section.active .progress-dot, .qi-meta.analyzing,
+  .reveal-banner, .drop-reject-banner, .update-toast { animation: none !important; }
+  button, .queue-item { transition: none !important; }
+}

@@ -26,6 +26,15 @@ const state = {
 let _nextId = 1;
 const MAX_TRACKS = 6;
 
+// Brief green flash (+ optional label) so fire-and-forget actions confirm they registered.
+function flashOk(btn, label) {
+  if (!btn) return;
+  const orig = btn.textContent;
+  btn.classList.add('flash-ok');
+  if (label) btn.textContent = label;
+  setTimeout(() => { btn.classList.remove('flash-ok'); if (label) btn.textContent = orig; }, 1300);
+}
+
 // ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
@@ -245,9 +254,14 @@ function renderQueue() {
     nm.title = item.path;
     const meta = document.createElement('div');
     meta.className = 'qi-meta';
-    meta.textContent = item.status === 'error'
-      ? (item.error || 'Error')
-      : `${fmtDuration(item.duration)}${item.chunks ? ` · ${item.chunks} chunk${item.chunks > 1 ? 's' : ''}` : ''}`;
+    if (item.status === 'error') {
+      meta.textContent = item.error || 'Error';
+    } else if (item.duration == null) {
+      meta.textContent = 'Analyzing…';           // animated pulse — clearly working, not stuck
+      meta.classList.add('analyzing');
+    } else {
+      meta.textContent = `${fmtDuration(item.duration)}${item.chunks ? ` · ${item.chunks} chunk${item.chunks > 1 ? 's' : ''}` : ''}`;
+    }
     main.appendChild(nm);
     main.appendChild(meta);
     el.appendChild(main);
@@ -256,7 +270,7 @@ function renderQueue() {
       const link = document.createElement('button');
       link.className = 'qi-done-link';
       link.textContent = 'Reveal';
-      link.addEventListener('click', () => api.revealFile(item.outputs[0]));
+      link.addEventListener('click', () => { api.revealFile(item.outputs[0]); flashOk(link, '✓'); });
       el.appendChild(link);
     } else {
       const st = document.createElement('div');
@@ -313,27 +327,33 @@ function updatePlan() {
   }
 }
 
-function multitrackReady() {
-  const n = state.queue.length;
-  if (n < 2 || n > MAX_TRACKS) return false;
-  const names = state.queue.map((q) => (q.speaker || '').trim());
-  if (names.some((x) => !x)) return false;
-  if (new Set(names.map((x) => x.toLowerCase())).size !== names.length) return false; // no dup names
-  return true;
+// The single reason Run is currently blocked, or null when ready — surfaced as
+// a live hint so a greyed-out button is never a mystery.
+function runBlockReason() {
+  if (!state.queue.length) return 'Add audio or video files to begin';
+  if (!state.queue.some((q) => q.status === 'queued')) return 'Nothing left to transcribe — add more files';
+  if (!state.settings.outputDir) return 'Choose an output folder';
+  if (selectedFormats().length === 0) return 'Pick an output format (.txt or .srt)';
+  if (state.mode === 'multitrack') {
+    const queued = state.queue.filter((q) => q.status === 'queued');
+    if (queued.length < 2) return 'Multitrack needs at least 2 tracks';
+    if (queued.length > MAX_TRACKS) return `Multitrack takes at most ${MAX_TRACKS} tracks`;
+    const names = queued.map((q) => (q.speaker || '').trim());
+    if (names.some((x) => !x)) return 'Name every speaker';
+    if (new Set(names.map((x) => x.toLowerCase())).size !== names.length) return 'Speaker names must be unique';
+  }
+  return null;
 }
 
 function updateRunButton() {
   const btn = $('btn-run');
-  if (state.running) { btn.disabled = false; return; }
+  const hint = $('run-hint');
+  if (state.running) { btn.disabled = false; hint.textContent = ''; hint.classList.remove('ready'); return; }
   if (state.starting) { btn.disabled = true; return; }
-  const hasFolder = !!state.settings.outputDir;
-  const hasFormat = selectedFormats().length > 0;
-  // Only queued items make the button actionable — an all-done queue must not
-  // leave an enabled-but-inert button.
-  const okReady = state.queue.some((q) => q.status === 'queued');
-  let ready = hasFolder && hasFormat && okReady;
-  if (state.mode === 'multitrack') ready = ready && multitrackReady();
-  btn.disabled = !ready;
+  const reason = runBlockReason();
+  btn.disabled = !!reason;
+  hint.textContent = reason || '';
+  hint.classList.remove('ready');
 }
 
 // ---------------------------------------------------------------------------
@@ -381,6 +401,20 @@ async function run() {
   enterRunningUI();
 }
 
+let _elapsedTimer = null;
+
+function startElapsed() {
+  const start = Date.now();
+  const tick = () => {
+    const s = Math.floor((Date.now() - start) / 1000);
+    $('progress-elapsed').textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  };
+  $('progress-elapsed').textContent = '0:00';
+  clearInterval(_elapsedTimer);
+  _elapsedTimer = setInterval(tick, 1000);
+}
+function stopElapsed() { clearInterval(_elapsedTimer); _elapsedTimer = null; }
+
 function enterRunningUI() {
   const btn = $('btn-run');
   btn.textContent = 'Cancel';
@@ -388,6 +422,7 @@ function enterRunningUI() {
   $('progress-section').classList.add('active');
   $('reveal-banner').classList.add('hidden');
   setProgress(0, 'Starting…', '');
+  startElapsed();
   renderQueue();
   updateRunButton();
   document.querySelectorAll('.mode-tab').forEach((t) => t.disabled = true);
@@ -396,6 +431,8 @@ function enterRunningUI() {
 function exitRunningUI() {
   const btn = $('btn-run');
   state.running = false;
+  stopElapsed();
+  $('progress-bar-wrap').classList.remove('indeterminate');
   btn.classList.remove('state-running');
   btn.textContent = state.mode === 'multitrack' ? 'Transcribe session' : 'Transcribe';
   document.querySelectorAll('.mode-tab').forEach((t) => t.disabled = false);
@@ -404,7 +441,11 @@ function exitRunningUI() {
 }
 
 function setProgress(pct, overall, status) {
-  $('progress-bar').style.width = `${pct}%`;
+  const p = Math.max(0, Math.min(100, pct || 0));
+  $('progress-bar').style.width = `${p}%`;
+  // No determinate % yet (model load / first chunk) → indeterminate sweep so the
+  // bar never looks frozen.
+  $('progress-bar-wrap').classList.toggle('indeterminate', state.running && p <= 0);
   if (overall != null) $('progress-overall-text').textContent = overall;
   if (status != null) $('progress-status-text').textContent = status;
 }
@@ -579,6 +620,7 @@ function renderPreflight(results) {
   $('btn-copy-preflight').onclick = () => {
     const text = Object.entries(results).map(([k, r]) => `${r.ok ? 'OK' : 'FAIL'} ${k}: ${r.message}`).join('\n');
     navigator.clipboard.writeText(text);
+    flashOk($('btn-copy-preflight'), 'Copied ✓');
   };
 }
 
@@ -748,7 +790,7 @@ function wireEvents() {
   $('btn-clear-done').addEventListener('click', () => { state.queue = state.queue.filter((q) => q.status !== 'done'); renderQueue(); updatePlan(); updateRunButton(); });
 
   $('btn-drop-reject-dismiss').addEventListener('click', () => $('drop-reject-banner').classList.add('hidden'));
-  $('btn-reveal-output').addEventListener('click', () => { if (state.lastOutputDir) api.openFolder(state.lastOutputDir); });
+  $('btn-reveal-output').addEventListener('click', (e) => { if (state.lastOutputDir) api.openFolder(state.lastOutputDir); flashOk(e.currentTarget); });
   $('btn-reveal-dismiss').addEventListener('click', () => $('reveal-banner').classList.add('hidden'));
 
   // Settings

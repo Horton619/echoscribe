@@ -76,14 +76,19 @@
       <button id="btn-clear-done" class="hidden" type="button">Clear all done</button>
 
       <div id="progress-section">
-        <div class="progress-overall" id="progress-overall-text"></div>
-        <div class="progress-bar-wrap">
-          <div class="progress-bar-fill" id="progress-bar"></div>
+        <div class="progress-overall">
+          <span class="progress-dot" id="progress-dot"></span>
+          <span id="progress-overall-text"></span>
+          <span class="progress-elapsed" id="progress-elapsed"></span>
+        </div>
+        <div class="progress-bar-wrap" id="progress-bar-wrap">
+          <div class="progress-bar-fill working" id="progress-bar"></div>
         </div>
         <div class="progress-status" id="progress-status-text"></div>
       </div>
 
       <button id="btn-run" class="btn-run state-idle" disabled>Transcribe</button>
+      <div class="run-hint" id="run-hint"></div>
 
     </section>
 

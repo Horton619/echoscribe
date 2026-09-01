@@ -64,12 +64,14 @@ function hydrateSidebar() {
   $('model-select').value = state.settings.model || 'mlx-community/whisper-large-v3-turbo';
   $('vocab-hint').value = state.settings.vocabHint || '';
   $('fmt-txt').checked = state.settings.outputTxt !== false;
+  $('fmt-ttxt').checked = state.settings.outputTtxt === true;
   $('fmt-srt').checked = state.settings.outputSrt !== false;
   $('script-timestamps').checked = state.settings.scriptTimestamps !== false;
 
   $('model-select').addEventListener('change', () => api.setSetting('model', $('model-select').value));
   $('vocab-hint').addEventListener('change', () => api.setSetting('vocabHint', $('vocab-hint').value));
   $('fmt-txt').addEventListener('change', () => { api.setSetting('outputTxt', $('fmt-txt').checked); updateRunButton(); });
+  $('fmt-ttxt').addEventListener('change', () => { api.setSetting('outputTtxt', $('fmt-ttxt').checked); updateRunButton(); });
   $('fmt-srt').addEventListener('change', () => { api.setSetting('outputSrt', $('fmt-srt').checked); updateRunButton(); });
   $('script-timestamps').addEventListener('change', () => api.setSetting('scriptTimestamps', $('script-timestamps').checked));
   $('session-name-input').addEventListener('input', () => { updateSessionExample(); updateRunButton(); });
@@ -168,7 +170,7 @@ function guessSpeaker(filename) {
 }
 
 async function probeItem(item) {
-  const res = await api.probeMedia(item.path, state.settings.chunkLength ?? 1200, state.settings.overlap ?? 10);
+  const res = await api.probeMedia(item.path, state.settings.chunkLength ?? 300, state.settings.overlap ?? 10);
   if (res && res.ok) {
     item.duration = res.duration;
     item.chunks = res.chunks;
@@ -306,6 +308,7 @@ function renderQueue() {
 function selectedFormats() {
   const f = [];
   if ($('fmt-txt').checked) f.push('txt');
+  if ($('fmt-ttxt').checked) f.push('ttxt');
   if ($('fmt-srt').checked) f.push('srt');
   return f;
 }
@@ -372,7 +375,7 @@ async function run() {
     files: pending.map((q) => q.path),
     outputDir: state.settings.outputDir,
     model: $('model-select').value,
-    chunkLength: state.settings.chunkLength ?? 1200,
+    chunkLength: state.settings.chunkLength ?? 300,
     overlap: state.settings.overlap ?? 10,
     vocabHint: $('vocab-hint').value.trim(),
     language: (state.settings.language || '').trim(),
@@ -569,12 +572,12 @@ function showError(m) {
 // ---------------------------------------------------------------------------
 
 function hydrateSettingsModal() {
-  $('setting-chunk').value = state.settings.chunkLength ?? 1200;
+  $('setting-chunk').value = state.settings.chunkLength ?? 300;
   $('setting-overlap').value = state.settings.overlap ?? 10;
   $('setting-language').value = state.settings.language || '';
   $('setting-auto-open').checked = state.settings.autoOpenOnComplete !== false;
 
-  $('setting-chunk').addEventListener('change', () => { state.settings.chunkLength = clampNum($('setting-chunk').value, 60, 1800, 1200); api.setSetting('chunkLength', state.settings.chunkLength); reprobeAll(); });
+  $('setting-chunk').addEventListener('change', () => { state.settings.chunkLength = clampNum($('setting-chunk').value, 30, 1800, 300); api.setSetting('chunkLength', state.settings.chunkLength); reprobeAll(); });
   $('setting-overlap').addEventListener('change', () => { state.settings.overlap = clampNum($('setting-overlap').value, 0, 60, 10); api.setSetting('overlap', state.settings.overlap); reprobeAll(); });
   $('setting-language').addEventListener('change', () => { state.settings.language = $('setting-language').value.trim(); api.setSetting('language', state.settings.language); });
   $('setting-auto-open').addEventListener('change', () => { state.settings.autoOpenOnComplete = $('setting-auto-open').checked; api.setSetting('autoOpenOnComplete', state.settings.autoOpenOnComplete); });

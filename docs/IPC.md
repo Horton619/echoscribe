@@ -20,7 +20,7 @@ Plus `src/preload.js` exposes the renderer-facing API (`window.echoscribe`).
 | `--overlap SEC` | Chunk overlap, default 10 |
 | `--initial-prompt TEXT` | Vocabulary hint → Whisper `initial_prompt` |
 | `--language CODE` | Force language; omit to auto-detect |
-| `--formats txt,srt` | Comma list of output formats |
+| `--formats txt,ttxt,srt` | Comma list of output formats (`ttxt` = timestamped text, `<base>_timestamped.txt`) |
 | `--ffmpeg-path DIR` | Dir holding ffmpeg/ffprobe (else PATH) |
 | `--multitrack` | Treat inputs as one speaker per aligned track |
 | `--speakers JSON` | JSON array of names, one per input file |

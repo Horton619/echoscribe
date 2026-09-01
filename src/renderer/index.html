@@ -120,6 +120,7 @@
       <div class="side-block">
         <div class="side-label">Output</div>
         <label class="check-label"><input type="checkbox" id="fmt-txt" checked> Plain text (.txt)</label>
+        <label class="check-label"><input type="checkbox" id="fmt-ttxt"> Timestamped text (.txt)</label>
         <label class="check-label"><input type="checkbox" id="fmt-srt" checked> Subtitles (.srt)</label>
         <label class="check-label hidden" id="script-ts-row"><input type="checkbox" id="script-timestamps" checked> Timestamps in script</label>
       </div>
@@ -191,7 +192,7 @@
               <input type="number" id="setting-chunk" class="settings-input" min="60" max="1800" step="30">
               <span class="settings-suffix">seconds</span>
             </div>
-            <div class="settings-hint">Long files are split into chunks before transcribing — mlx-whisper hallucinates on files over ~20 min. Default 1200 s (20 min). Smaller = more frequent progress.</div>
+            <div class="settings-hint">Long files are split into chunks before transcribing (mlx-whisper degrades on very long files). Default 300 s (5 min) — smaller gives smoother progress and stays well within safe limits.</div>
           </div>
           <div class="settings-row">
             <div class="settings-row-label">Chunk overlap</div>

@@ -137,13 +137,21 @@ def extract_chunk(input_path, global_start, dur, out_wav, ffmpeg_bin):
 # Transcription + merge
 # ---------------------------------------------------------------------------
 
-# Hallucination-resistant decode params (from mlx-whisper-long). Keep these —
-# they're what makes long-file output trustworthy.
+# Hallucination-resistant decode params. Keep these — they're what makes
+# long-file output trustworthy.
+#   no_speech_threshold 0.6      → treat low-speech-probability windows as silence
+#   compression_ratio_threshold  → discard repetitive (looping) output
+#   hallucination_silence_threshold → when word_timestamps is on, skip silent
+#       gaps > this many seconds when a likely hallucination is detected. This is
+#       what suppresses the "Thank you." / "We'll be right back." spam Whisper
+#       otherwise invents over quiet stretches.
 _DECODE_OPTS = dict(
     condition_on_previous_text=False,
     no_speech_threshold=0.6,
     compression_ratio_threshold=2.4,
+    logprob_threshold=-1.0,
     word_timestamps=True,
+    hallucination_silence_threshold=2.0,
 )
 
 
@@ -226,6 +234,32 @@ def write_txt(path, segments):
     _atomic_write(path, "\n".join(seg["text"] for seg in segments) + "\n")
 
 
+def _hms(t):
+    total = max(0, int(t))
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+
+def write_timestamped_txt(path, segments):
+    """Readable transcript with a [HH:MM:SS] time prefix on each segment."""
+    _atomic_write(path, "\n".join(f"[{_hms(seg['start'])}] {seg['text']}" for seg in segments) + "\n")
+
+
+def collapse_repeats(segments):
+    """Collapse a run of consecutive segments with identical text into one.
+    Whisper hallucinates a short phrase ("Thank you.", "We'll be right back.")
+    over quiet stretches, emitting it many times back-to-back; this removes the
+    spam while keeping one instance (and extending its end time)."""
+    out = []
+    for s in segments:
+        if out and _norm_text(out[-1]["text"]) == _norm_text(s["text"]):
+            out[-1]["end"] = s["end"]
+            continue
+        out.append(s)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Per-file driver
 # ---------------------------------------------------------------------------
@@ -260,7 +294,7 @@ def process_file(path, file_index, total_files, opts):
             chunk_results.append((gstart, result))
             os.unlink(wav)
 
-        segments = merge(chunk_results, opts.overlap)
+        segments = collapse_repeats(merge(chunk_results, opts.overlap))
 
         base = os.path.splitext(name)[0]
         out_dir = opts.output_dir or os.path.dirname(path)
@@ -270,6 +304,10 @@ def process_file(path, file_index, total_files, opts):
         if "txt" in formats:
             p = os.path.join(out_dir, base + ".txt")
             write_txt(p, segments)
+            outputs.append(p)
+        if "ttxt" in formats:
+            p = os.path.join(out_dir, base + "_timestamped.txt")
+            write_timestamped_txt(p, segments)
             outputs.append(p)
         if "srt" in formats:
             p = os.path.join(out_dir, base + ".srt")
@@ -532,7 +570,7 @@ def process_multitrack(files, speakers, opts):
 
     # Phase D: merge → dedup → write.
     all_segments.sort(key=lambda s: s["start"])
-    final = dedup_across_tracks(all_segments)
+    final = collapse_repeats(dedup_across_tracks(all_segments))
 
     out_dir = opts.output_dir or os.path.dirname(files[0])
     os.makedirs(out_dir, exist_ok=True)
@@ -725,8 +763,9 @@ def main():
     p.add_argument("--output-dir", "-o", default=None)
     p.add_argument("--model", default="mlx-community/whisper-large-v3-turbo",
                    help="HF repo id for the mlx-whisper model")
-    p.add_argument("--chunk-length", type=float, default=1200.0,
-                   help="chunk length in seconds (default 1200 = 20 min)")
+    p.add_argument("--chunk-length", type=float, default=300.0,
+                   help="chunk length in seconds (default 300 = 5 min; smaller = "
+                        "smoother progress, well under mlx-whisper's long-file limit)")
     p.add_argument("--overlap", type=float, default=10.0,
                    help="overlap between chunks in seconds")
     p.add_argument("--initial-prompt", default=None,

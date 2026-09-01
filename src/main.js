@@ -48,11 +48,12 @@ class SettingsStore {
     return {
       outputDir: null,
       model: 'mlx-community/whisper-large-v3-turbo',
-      chunkLength: 1200,           // seconds (~20 min)
+      chunkLength: 300,            // seconds (5 min) — smooth progress, safe
       overlap: 10,                 // seconds
       vocabHint: '',               // passed as --initial-prompt
       language: '',                // '' = auto-detect
       outputTxt: true,
+      outputTtxt: false,           // timestamped text — off by default
       outputSrt: true,
       autoOpenOnComplete: true,
       skin: 'professional',        // professional | fun
@@ -511,7 +512,7 @@ ipcMain.handle('media:scan', async (e, itemPaths) => {
 // --- Media probe: duration + planned chunk count for one file ---
 ipcMain.handle('media:probe', async (e, filePath, chunkLength, overlap) => {
   const args = ['--probe', filePath, '--ipc',
-    '--chunk-length', String(chunkLength ?? 1200), '--overlap', String(overlap ?? 10)];
+    '--chunk-length', String(chunkLength ?? 300), '--overlap', String(overlap ?? 10)];
   const ffmpegDir = resolveFfmpegDir();
   if (ffmpegDir) args.push('--ffmpeg-path', ffmpegDir);
   return new Promise((resolve) => {
@@ -556,7 +557,7 @@ ipcMain.handle('transcription:start', async (e, payload) => {
   try {
     currentJob = new TranscriptionJob({
       files, outputDir, model,
-      chunkLength: chunkLength ?? 1200,
+      chunkLength: chunkLength ?? 300,
       overlap: overlap ?? 10,
       vocabHint: vocabHint || '',
       language: language || '',

@@ -42,6 +42,22 @@ class SettingsStore {
   constructor() {
     this.filePath = path.join(app.getPath('userData'), 'echoscribe-settings.json');
     this._data = this._load();
+    this._migrate();
+  }
+
+  // One-time migrations for values that were auto-persisted under an old default,
+  // so changing a code default actually reaches existing installs (a persisted
+  // key otherwise always wins over the new default).
+  _migrate() {
+    const CURRENT = 2;
+    if ((this._data._schema || 1) < 2) {
+      // v1→v2: the 1200s chunk length was the old auto-written default, never a
+      // deliberate choice — bump it to the new 300s default for smoother progress.
+      if (this._data.chunkLength === 1200) this._data.chunkLength = this._defaults().chunkLength;
+      this._data._schema = 2;
+    }
+    if ((this._data._schema || 1) < CURRENT) this._data._schema = CURRENT;
+    this.save();
   }
 
   _defaults() {

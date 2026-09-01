@@ -195,6 +195,128 @@ def merge(chunk_results, overlap: float):
 
 
 # ---------------------------------------------------------------------------
+# Word-level merge + re-segmentation
+#
+# Segment-level seam handling can't fully dedup a chunk boundary when the two
+# chunks transcribe the ~overlap seconds slightly differently and a sentence
+# straddles the seam. Working at the WORD level fixes it: each chunk owns a
+# contiguous time window, cut at the quietest point inside the overlap, and each
+# word is assigned to exactly one window by its own timestamp — no word appears
+# twice, none is dropped. From the clean word stream we then re-segment into
+# readable paragraphs (silence + punctuation) and properly-sized subtitle cues.
+# ---------------------------------------------------------------------------
+
+def _chunk_words(gstart, result):
+    """Flatten a chunk result into a global-timed word list. Falls back to
+    whole segments if word timestamps are somehow absent."""
+    words = []
+    for seg in result.get("segments") or []:
+        ws = seg.get("words") or []
+        if ws:
+            for w in ws:
+                txt = w.get("word", "")
+                if txt.strip():
+                    words.append({"start": float(w["start"]) + gstart,
+                                  "end": float(w["end"]) + gstart, "word": txt})
+        elif seg.get("text", "").strip():
+            words.append({"start": float(seg["start"]) + gstart,
+                          "end": float(seg["end"]) + gstart, "word": " " + seg["text"].strip()})
+    return words
+
+
+def _seam_cut(words_a, words_b, ov_lo, overlap):
+    """Pick a cut time inside the overlap [ov_lo, ov_lo+overlap]: the midpoint of
+    the widest word-gap that is quiet in BOTH chunks. Falls back to the overlap
+    midpoint. Cutting at a real pause means no spoken word straddles the seam, so
+    the handoff between chunks is clean."""
+    ov_hi = ov_lo + overlap
+    default = ov_lo + overlap / 2.0
+
+    def spans(words, t):  # is time t inside some word (not a gap) for this chunk?
+        return any(w["start"] - 0.05 <= t <= w["end"] + 0.05 for w in words if ov_lo <= w["end"] and w["start"] <= ov_hi)
+
+    best_cut, best_gap = default, -1.0
+    seq = [w for w in words_a if w["end"] >= ov_lo - 0.2 and w["start"] <= ov_hi + 0.2]
+    for a, b in zip(seq, seq[1:]):
+        mid = (a["end"] + b["start"]) / 2.0
+        gap = b["start"] - a["end"]
+        if ov_lo <= mid <= ov_hi and gap > best_gap and not spans(words_b, mid):
+            best_gap, best_cut = gap, mid
+    return best_cut
+
+
+def merge_words(chunk_results, overlap):
+    """Stitch chunk word-streams into one continuous, de-seamed word list."""
+    n = len(chunk_results)
+    per_chunk = [_chunk_words(g, r) for (g, r) in chunk_results]
+    cuts = []
+    for i in range(n - 1):
+        cuts.append(_seam_cut(per_chunk[i], per_chunk[i + 1], chunk_results[i + 1][0], overlap))
+    merged = []
+    for i in range(n):
+        lo = cuts[i - 1] if i > 0 else float("-inf")
+        hi = cuts[i] if i < n - 1 else float("inf")
+        for w in per_chunk[i]:
+            mid = (w["start"] + w["end"]) / 2.0
+            if lo <= mid < hi:
+                merged.append(w)
+    return merged
+
+
+def _wjoin(words):
+    return {"start": words[0]["start"], "end": words[-1]["end"],
+            "text": "".join(w["word"] for w in words).strip()}
+
+
+def words_to_sentences(words):
+    """Group words into sentence-ish units, breaking after . ? ! (used by the
+    multitrack path, which then merges/labels by speaker)."""
+    out, cur = [], []
+    for w in words:
+        cur.append(w)
+        if w["word"].strip()[-1:] in ".?!":
+            out.append(_wjoin(cur)); cur = []
+    if cur:
+        out.append(_wjoin(cur))
+    return out
+
+
+def words_to_paragraphs(words, gap=1.4, hard_gap=2.6, max_chars=550):
+    """Break the word stream into readable paragraphs: a new paragraph starts at a
+    speaking pause (≥gap) that lands on a sentence end, at any long pause
+    (≥hard_gap), or when a paragraph gets long and reaches a sentence end."""
+    paras, cur = [], []
+    for w in words:
+        if cur:
+            pause = w["start"] - cur[-1]["end"]
+            text = "".join(x["word"] for x in cur).strip()
+            ends_sentence = text[-1:] in ".?!"
+            if (pause >= gap and ends_sentence) or pause >= hard_gap or (len(text) >= max_chars and ends_sentence):
+                paras.append(_wjoin(cur)); cur = []
+        cur.append(w)
+    if cur:
+        paras.append(_wjoin(cur))
+    return paras
+
+
+def words_to_cues(words, max_dur=5.5, max_chars=90):
+    """Group words into subtitle cues capped by duration and length, preferring to
+    break at punctuation so cues read as clauses."""
+    cues, cur = [], []
+    for w in words:
+        if cur:
+            dur = w["end"] - cur[0]["start"]
+            text = "".join(x["word"] for x in cur)
+            soft = text.strip()[-1:] in ".?!,;:"
+            if ((dur >= max_dur or len(text) >= max_chars) and soft) or dur >= max_dur * 1.6 or len(text) >= max_chars * 1.4:
+                cues.append(_wjoin(cur)); cur = []
+        cur.append(w)
+    if cur:
+        cues.append(_wjoin(cur))
+    return cues
+
+
+# ---------------------------------------------------------------------------
 # Output writers (atomic: temp + os.replace)
 # ---------------------------------------------------------------------------
 
@@ -246,6 +368,16 @@ def write_timestamped_txt(path, segments):
     _atomic_write(path, "\n".join(f"[{_hms(seg['start'])}] {seg['text']}" for seg in segments) + "\n")
 
 
+def write_paragraph_txt(path, paragraphs):
+    """Clean, postable transcript — paragraphs separated by a blank line, no times."""
+    _atomic_write(path, "\n\n".join(p["text"] for p in paragraphs) + "\n")
+
+
+def write_paragraph_ttxt(path, paragraphs):
+    """Readable transcript with a [HH:MM:SS] prefix per paragraph."""
+    _atomic_write(path, "\n\n".join(f"[{_hms(p['start'])}] {p['text']}" for p in paragraphs) + "\n")
+
+
 def collapse_repeats(segments):
     """Collapse a run of consecutive segments with identical text into one.
     Whisper hallucinates a short phrase ("Thank you.", "We'll be right back.")
@@ -294,7 +426,11 @@ def process_file(path, file_index, total_files, opts):
             chunk_results.append((gstart, result))
             os.unlink(wav)
 
-        segments = collapse_repeats(merge(chunk_results, opts.overlap))
+        # Word-level: clean seams, then re-segment into readable paragraphs and
+        # subtitle cues.
+        words = merge_words(chunk_results, opts.overlap)
+        paragraphs = collapse_repeats(words_to_paragraphs(words))
+        cues = words_to_cues(words)
 
         base = os.path.splitext(name)[0]
         out_dir = opts.output_dir or os.path.dirname(path)
@@ -303,21 +439,21 @@ def process_file(path, file_index, total_files, opts):
         outputs = []
         if "txt" in formats:
             p = os.path.join(out_dir, base + ".txt")
-            write_txt(p, segments)
+            write_paragraph_txt(p, paragraphs)
             outputs.append(p)
         if "ttxt" in formats:
             p = os.path.join(out_dir, base + "_timestamped.txt")
-            write_timestamped_txt(p, segments)
+            write_paragraph_ttxt(p, paragraphs)
             outputs.append(p)
         if "srt" in formats:
             p = os.path.join(out_dir, base + ".srt")
-            write_srt(p, segments)
+            write_srt(p, cues)
             outputs.append(p)
 
         lang = chunk_results[0][1].get("language") if chunk_results else None
         _emit({
             "type": "done", "file": name, "file_path": path, "outputs": outputs,
-            "segments": len(segments), "duration": duration,
+            "segments": len(paragraphs), "duration": duration,
             "chunks": len(chunks), "language": lang, "output_dir": out_dir,
         })
         return True
@@ -449,7 +585,8 @@ def chunk_and_transcribe_array(audio, opts, progress_cb=None):
         results.append((s / SR, result))
         if s + seg_samples >= total:
             break
-    return merge(results, opts.overlap)
+    # Word-stitched, then re-segmented into sentences for the multitrack merge.
+    return words_to_sentences(merge_words(results, opts.overlap))
 
 
 def _energy_at(env, start, end):

@@ -396,7 +396,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 
 /* ---- Progress: never look frozen ---- */
 .progress-overall { display: flex; align-items: center; gap: 7px; }
-.progress-elapsed { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--text-muted); font-size: 10.5px; }
+#progress-overall-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.progress-elapsed { margin-left: auto; flex-shrink: 0; white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--text-muted); font-size: 10.5px; }
 .progress-dot {
   width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); flex-shrink: 0;
 }

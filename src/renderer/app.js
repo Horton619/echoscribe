@@ -405,16 +405,43 @@ async function run() {
 }
 
 let _elapsedTimer = null;
+let _runStart = 0;
+let _etaAtMs = 0;        // "remaining ms" snapshot taken at _etaSnapTime
+let _etaSnapTime = 0;
+
+function fmtClock(sec) {
+  sec = Math.max(0, Math.round(sec));
+  return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+}
+
+// Re-estimate remaining time at each progress update: total ≈ elapsed / fraction,
+// so remaining ≈ elapsed·(100−pct)/pct. Snapshot it and count down between
+// updates so the number falls smoothly instead of jittering. Gated to ≥8% so the
+// first estimate (which carries one-time model-load overhead) isn't wildly high.
+function noteEtaProgress(pct) {
+  if (pct >= 8 && pct < 100) {
+    const elapsed = Date.now() - _runStart;
+    _etaAtMs = elapsed * (100 - pct) / pct;
+    _etaSnapTime = Date.now();
+  }
+}
+
+function paintElapsed() {
+  const elapsed = (Date.now() - _runStart) / 1000;
+  let text = `${fmtClock(elapsed)} elapsed`;
+  if (_etaSnapTime) {
+    const remMs = _etaAtMs - (Date.now() - _etaSnapTime);
+    text += remMs > 1500 ? `  ·  ~${fmtClock(remMs / 1000)} left` : '  ·  finishing…';
+  }
+  $('progress-elapsed').textContent = text;
+}
 
 function startElapsed() {
-  const start = Date.now();
-  const tick = () => {
-    const s = Math.floor((Date.now() - start) / 1000);
-    $('progress-elapsed').textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
-  };
-  $('progress-elapsed').textContent = '0:00';
+  _runStart = Date.now();
+  _etaAtMs = 0; _etaSnapTime = 0;
+  paintElapsed();
   clearInterval(_elapsedTimer);
-  _elapsedTimer = setInterval(tick, 1000);
+  _elapsedTimer = setInterval(paintElapsed, 1000);
 }
 function stopElapsed() { clearInterval(_elapsedTimer); _elapsedTimer = null; }
 
@@ -446,6 +473,7 @@ function exitRunningUI() {
 function setProgress(pct, overall, status) {
   const p = Math.max(0, Math.min(100, pct || 0));
   $('progress-bar').style.width = `${p}%`;
+  if (state.running) { noteEtaProgress(p); paintElapsed(); }
   // No determinate % yet (model load / first chunk) → indeterminate sweep so the
   // bar never looks frozen.
   $('progress-bar-wrap').classList.toggle('indeterminate', state.running && p <= 0);

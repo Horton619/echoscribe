@@ -143,7 +143,8 @@ async function addPaths(paths) {
     if (state.queue.some((q) => q.path === p)) continue;
     if (state.mode === 'multitrack' && state.queue.length >= MAX_TRACKS) { overflow = true; break; }
     const name = p.split('/').pop();
-    const item = { id: _nextId++, path: p, name, speaker: guessSpeaker(name), status: 'queued', duration: null, chunks: null };
+    const item = { id: _nextId++, path: p, name, speaker: guessSpeaker(name),
+                   outName: name.replace(/\.[^.]+$/, ''), status: 'queued', duration: null, chunks: null };
     state.queue.push(item);
     probeItem(item);
   }
@@ -221,9 +222,10 @@ function renderQueue() {
   // Preserve focus + caret if a speaker input is being typed into — an async
   // probe resolving mid-typing must not steal the caret and drop keystrokes.
   const active = document.activeElement;
-  let focusId = null, caret = null;
-  if (active && active.classList && active.classList.contains('speaker-input')) {
+  let focusId = null, caret = null, focusClass = null;
+  if (active && active.classList && (active.classList.contains('speaker-input') || active.classList.contains('outname-input'))) {
     focusId = active.dataset.itemId; caret = active.selectionStart;
+    focusClass = active.classList.contains('outname-input') ? 'outname-input' : 'speaker-input';
   }
   list.innerHTML = '';
   const mt = state.mode === 'multitrack';
@@ -250,21 +252,40 @@ function renderQueue() {
 
     const main = document.createElement('div');
     main.className = 'qi-main';
-    const nm = document.createElement('div');
-    nm.className = 'qi-name';
-    nm.textContent = item.name;
-    nm.title = item.path;
+
+    // Batch mode: an editable OUTPUT name (defaults to the source filename) so a
+    // "hyperdeck0003.mp4" can become "9am session" while it's fresh. Multitrack
+    // names outputs by session, so it keeps the read-only source name.
+    if (!mt) {
+      const out = document.createElement('input');
+      out.className = 'outname-input';
+      out.value = item.outName || '';
+      out.placeholder = 'Output name';
+      out.title = 'Name for the output files (.txt / .srt)';
+      out.disabled = state.running;
+      out.dataset.itemId = item.id;
+      out.addEventListener('input', () => { item.outName = out.value; });
+      main.appendChild(out);
+    } else {
+      const nm = document.createElement('div');
+      nm.className = 'qi-name';
+      nm.textContent = item.name;
+      nm.title = item.path;
+      main.appendChild(nm);
+    }
+
     const meta = document.createElement('div');
     meta.className = 'qi-meta';
+    const src = mt ? '' : `${item.name} · `;   // show the source file in batch mode
     if (item.status === 'error') {
       meta.textContent = item.error || 'Error';
     } else if (item.duration == null) {
-      meta.textContent = 'Analyzing…';           // animated pulse — clearly working, not stuck
+      meta.textContent = `${src}Analyzing…`;      // animated pulse — clearly working, not stuck
       meta.classList.add('analyzing');
     } else {
-      meta.textContent = `${fmtDuration(item.duration)}${item.chunks ? ` · ${item.chunks} chunk${item.chunks > 1 ? 's' : ''}` : ''}`;
+      meta.textContent = `${src}${fmtDuration(item.duration)}${item.chunks ? ` · ${item.chunks} chunk${item.chunks > 1 ? 's' : ''}` : ''}`;
     }
-    main.appendChild(nm);
+    meta.title = mt ? '' : item.path;
     main.appendChild(meta);
     el.appendChild(main);
 
@@ -293,7 +314,7 @@ function renderQueue() {
   }
 
   if (focusId != null) {
-    const again = list.querySelector(`.speaker-input[data-item-id="${focusId}"]`);
+    const again = list.querySelector(`.${focusClass}[data-item-id="${focusId}"]`);
     if (again) { again.focus(); if (caret != null) try { again.setSelectionRange(caret, caret); } catch (_) {} }
   }
 
@@ -387,6 +408,8 @@ async function run() {
     payload.sessionName = ($('session-name-input').value.trim() || 'session');
     payload.perSpeaker = true;
     payload.scriptTimestamps = $('script-timestamps').checked;
+  } else {
+    payload.outNames = pending.map((q) => (q.outName || '').trim());   // custom output filenames
   }
 
   state.starting = true;

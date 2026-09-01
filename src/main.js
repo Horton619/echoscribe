@@ -237,6 +237,8 @@ class TranscriptionJob {
       args.push('--session-name', this.sessionName || 'session');
       if (this.perSpeaker) args.push('--per-speaker');
       args.push('--script-timestamps', this.scriptTimestamps === false ? 'no' : 'yes');
+    } else if (Array.isArray(this.outNames) && this.outNames.some((n) => (n || '').trim())) {
+      args.push('--out-names', JSON.stringify(this.outNames));
     }
     const ffmpegDir = resolveFfmpegDir();
     if (ffmpegDir) args.push('--ffmpeg-path', ffmpegDir);
@@ -559,7 +561,7 @@ ipcMain.handle('transcription:start', async (e, payload) => {
   if (currentJob) return { ok: false, error: 'A transcription is already running.' };
   const {
     files, outputDir, model, chunkLength, overlap, vocabHint, language, formats,
-    multitrack, speakers, sessionName, perSpeaker, scriptTimestamps,
+    multitrack, speakers, sessionName, perSpeaker, scriptTimestamps, outNames,
   } = payload || {};
 
   // Validate at the IPC boundary — a malformed payload must not throw (which
@@ -583,6 +585,7 @@ ipcMain.handle('transcription:start', async (e, payload) => {
       sessionName: sessionName || 'session',
       perSpeaker: perSpeaker !== false,
       scriptTimestamps: scriptTimestamps !== false,
+      outNames: Array.isArray(outNames) ? outNames : [],
       win: mainWindow,
     });
     currentJob.start();

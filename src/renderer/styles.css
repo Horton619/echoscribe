@@ -168,6 +168,19 @@ main {
 .speaker-input:focus { outline: none; border-color: var(--accent); }
 .speaker-input::placeholder { color: var(--text-muted); }
 
+/* Editable output-name field (batch mode) — looks like editable text, reveals
+   its field affordance on hover/focus. */
+.outname-input {
+  width: 100%; background: var(--surface-2); border: 1px solid var(--border);
+  color: var(--text); font-size: 12.5px; font-weight: 500; font-family: inherit;
+  padding: 4px 8px; border-radius: var(--radius-sm);
+  -webkit-user-select: text; user-select: text; transition: border-color .12s;
+}
+.outname-input:hover:not(:disabled) { border-color: var(--text-muted); }
+.outname-input:focus { outline: none; border-color: var(--accent); }
+.outname-input:disabled { background: transparent; border-color: transparent; }
+.outname-input::placeholder { color: var(--text-muted); }
+
 #btn-clear-done {
   align-self: flex-start; background: none; border: 1px solid var(--border);
   color: var(--text-dim); padding: 4px 10px; border-radius: var(--radius-sm);

@@ -433,7 +433,13 @@ def collapse_repeats(segments):
 # Per-file driver
 # ---------------------------------------------------------------------------
 
-def process_file(path, file_index, total_files, opts):
+def _safe_base(name):
+    """Sanitize a user-typed output name into a safe filename base."""
+    name = re.sub(r'[/\\:*?"<>|\x00-\x1f]', "_", name).strip().strip(".")
+    return name
+
+
+def process_file(path, file_index, total_files, opts, out_name=None):
     name = os.path.basename(path)
     ffmpeg_bin = _ffbin("ffmpeg", opts.ffmpeg_path)
     ffprobe_bin = _ffbin("ffprobe", opts.ffmpeg_path)
@@ -471,7 +477,7 @@ def process_file(path, file_index, total_files, opts):
         paragraphs = collapse_repeats(words_to_paragraphs(words))
         cues = collapse_repeats(words_to_cues(words))
 
-        base = os.path.splitext(name)[0]
+        base = _safe_base(out_name) if out_name and _safe_base(out_name) else os.path.splitext(name)[0]
         out_dir = opts.output_dir or os.path.dirname(path)
         os.makedirs(out_dir, exist_ok=True)
         formats = [f.strip() for f in opts.formats.split(",") if f.strip()]
@@ -949,6 +955,9 @@ def main():
     p.add_argument("--language", default=None,
                    help="force a language code; omit to auto-detect")
     p.add_argument("--formats", default="txt,srt", help="comma list: txt,srt")
+    p.add_argument("--out-names", default=None, metavar="JSON",
+                   help="JSON array of output filename bases, one per input ("
+                        "empty string = use the source filename)")
     p.add_argument("--ffmpeg-path", default=None,
                    help="directory containing ffmpeg/ffprobe (else PATH)")
     # Multitrack mode (diarization-by-hardware) — see process_multitrack.
@@ -1008,11 +1017,13 @@ def main():
             _emit({"type": "batch_done", "transcribed": 0, "errors": 1})
         return
 
+    out_names = json.loads(opts.out_names) if opts.out_names else []
     total = len(opts.inputs)
     transcribed = errors = 0
     for i, path in enumerate(opts.inputs, 1):
+        out_name = out_names[i - 1] if i - 1 < len(out_names) else None
         try:
-            if process_file(path, i, total, opts):
+            if process_file(path, i, total, opts, out_name=out_name):
                 transcribed += 1
         except Exception as e:
             errors += 1

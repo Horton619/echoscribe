@@ -133,6 +133,43 @@ def extract_chunk(input_path, global_start, dur, out_wav, ffmpeg_bin):
         raise RuntimeError(f"ffmpeg chunk extract failed: {proc.stderr.strip()[-400:]}")
 
 
+def detect_silences(path, ffmpeg_bin, noise_db=-33, min_dur=2.5):
+    """Silent intervals (s) via ffmpeg silencedetect. Whisper invents phrases
+    ("Thank you.") over dead air; dropping words that land in these intervals
+    removes that at the source (what a VAD does), rather than masking it after."""
+    try:
+        proc = subprocess.run(
+            [ffmpeg_bin, "-nostdin", "-i", path, "-af",
+             f"silencedetect=noise={noise_db}dB:d={min_dur}", "-f", "null", "-"],
+            capture_output=True, text=True)
+    except Exception:
+        return []
+    silences, start = [], None
+    for line in proc.stderr.splitlines():
+        if "silence_start:" in line:
+            try:
+                start = float(line.split("silence_start:")[1].split()[0])
+            except Exception:
+                start = None
+        elif "silence_end:" in line and start is not None:
+            try:
+                silences.append((start, float(line.split("silence_end:")[1].split()[0])))
+            except Exception:
+                pass
+            start = None
+    return silences
+
+
+def filter_silence(words, silences, margin=0.35):
+    """Drop words whose midpoint falls inside a detected silence (shrunk by a
+    margin so a word at the very edge of a real pause is kept)."""
+    if not silences:
+        return words
+    return [w for w in words
+            if not any(s + margin <= (w["start"] + w["end"]) / 2.0 <= e - margin
+                       for (s, e) in silences)]
+
+
 # ---------------------------------------------------------------------------
 # Transcription + merge
 # ---------------------------------------------------------------------------
@@ -426,11 +463,13 @@ def process_file(path, file_index, total_files, opts):
             chunk_results.append((gstart, result))
             os.unlink(wav)
 
-        # Word-level: clean seams, then re-segment into readable paragraphs and
-        # subtitle cues.
-        words = merge_words(chunk_results, opts.overlap)
+        # Word-level: clean seams, drop words that fall in detected silence
+        # (kills over-quiet hallucinations at the source), then re-segment into
+        # readable paragraphs and subtitle cues (collapse any residual repeats).
+        words = filter_silence(merge_words(chunk_results, opts.overlap),
+                               detect_silences(path, ffmpeg_bin))
         paragraphs = collapse_repeats(words_to_paragraphs(words))
-        cues = words_to_cues(words)
+        cues = collapse_repeats(words_to_cues(words))
 
         base = os.path.splitext(name)[0]
         out_dir = opts.output_dir or os.path.dirname(path)

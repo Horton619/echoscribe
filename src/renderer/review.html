@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self';">
+  <title>Review &amp; Polish</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="review.css">
+</head>
+<body class="review-body">
+  <header class="review-header">
+    <div class="review-title-row">
+      <div>
+        <div class="review-eyebrow">Review &amp; Polish</div>
+        <div class="review-docname" id="review-docname">—</div>
+      </div>
+      <div class="review-mode" role="tablist" aria-label="Polish mode">
+        <button class="review-mode-tab active" data-mode="stepwise" role="tab">Step&#8209;by&#8209;step</button>
+        <button class="review-mode-tab" data-mode="madmax" role="tab">Mad&nbsp;Max</button>
+      </div>
+    </div>
+
+    <div class="review-controls">
+      <div class="review-toggles">
+        <label class="review-check"><input type="checkbox" id="tg-confidence"><span>Confidence heat</span></label>
+        <label class="review-check"><input type="checkbox" id="tg-fillers"><span>Highlight fillers</span></label>
+        <label class="review-check"><input type="checkbox" id="tg-conf-check"><span>Flag low&#8209;confidence</span></label>
+        <label class="review-threshold" id="threshold-wrap">
+          &lt; <input type="number" id="conf-threshold" min="0" max="1" step="0.05" value="0.5"> confidence
+        </label>
+      </div>
+      <div class="review-actions">
+        <button class="btn-review-secondary" id="btn-lists">Word lists</button>
+        <button class="btn-review-primary" id="btn-sweep">Run sweep</button>
+      </div>
+    </div>
+    <div class="review-mode-hint" id="mode-hint"></div>
+  </header>
+
+  <main class="review-main">
+    <div class="review-transcript-wrap">
+      <div id="transcript" class="transcript"></div>
+    </div>
+
+    <aside class="review-panel" id="review-panel">
+      <div id="panel-idle" class="panel-idle">
+        <p>Pick a mode, tune the toggles, then <strong>Run sweep</strong>.</p>
+        <ul class="panel-legend">
+          <li><span class="legend-swatch swatch-mid"></span>medium confidence</li>
+          <li><span class="legend-swatch swatch-conf"></span>low confidence</li>
+          <li><span class="legend-swatch swatch-filler"></span>filler word</li>
+          <li><span class="legend-swatch swatch-changed"></span>changed</li>
+          <li><span class="legend-swatch swatch-removed"></span>removed</li>
+        </ul>
+      </div>
+      <div id="panel-step" class="panel-step" hidden></div>
+      <div id="panel-summary" class="panel-summary" hidden></div>
+    </aside>
+  </main>
+
+  <footer class="review-footer">
+    <div class="review-status" id="review-status"></div>
+    <div class="review-footer-actions">
+      <button class="btn-review-secondary" id="btn-revert" hidden>Revert all</button>
+      <button class="btn-review-primary" id="btn-save" disabled>Save &amp; export</button>
+    </div>
+  </footer>
+
+  <!-- Word lists editor -->
+  <div class="lists-overlay hidden" id="lists-overlay">
+    <div class="lists-panel">
+      <div class="lists-header">
+        <span>Word lists</span>
+        <button class="settings-close" id="btn-lists-close">&#10005;</button>
+      </div>
+      <div class="lists-body">
+        <label class="lists-label" for="ta-corrections">Corrections — one <code>wrong =&gt; right</code> per line</label>
+        <textarea id="ta-corrections" class="lists-textarea" spellcheck="false"
+          placeholder="planner =&gt; planter&#10;Fent =&gt; Fendt&#10;Heston =&gt; Hesston"></textarea>
+        <label class="lists-label" for="ta-fillers">Filler words — comma or newline separated</label>
+        <textarea id="ta-fillers" class="lists-textarea lists-textarea-short" spellcheck="false"
+          placeholder="um, uh, you know, i mean"></textarea>
+        <label class="review-check review-check-block"><input type="checkbox" id="tg-filler-remove"><span>Remove filler words in the sweep</span></label>
+      </div>
+      <div class="lists-footer">
+        <button class="btn-review-secondary" id="btn-lists-cancel">Cancel</button>
+        <button class="btn-review-primary" id="btn-lists-save">Save lists</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="review.js"></script>
+</body>
+</html>

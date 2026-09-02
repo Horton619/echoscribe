@@ -28,12 +28,14 @@ write_outputs() without reshaping anything here — do not couple those steps.
 
 import argparse
 import json
+import math
 import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 # ---------------------------------------------------------------------------
 # IPC / logging
@@ -182,8 +184,18 @@ def filter_silence(words, silences, margin=0.35):
 #       gaps > this many seconds when a likely hallucination is detected. This is
 #       what suppresses the "Thank you." / "We'll be right back." spam Whisper
 #       otherwise invents over quiet stretches.
+# condition_on_previous_text=True: carries decoded text across Whisper's
+# internal 30s windows. With it False, words straddling a 30s boundary were
+# silently dropped (~1 short run per boundary — invisible on short clips, ~10
+# lost fragments on a 44-min file). It was originally False to stop
+# hallucination loops on long files; that job is now done downstream by
+# chunking (5-min blast radius), compression_ratio_threshold (kills loops),
+# hallucination_silence_threshold, and the silencedetect post-filter — so
+# turning it back on recovers the dropped words with no hallucination regression
+# (verified on the AGCO press-event + data-farming files). It also lets the
+# vocabulary hint bias every window, not just the first of each chunk.
 _DECODE_OPTS = dict(
-    condition_on_previous_text=False,
+    condition_on_previous_text=True,
     no_speech_threshold=0.6,
     compression_ratio_threshold=2.4,
     logprob_threshold=-1.0,
@@ -254,10 +266,14 @@ def _chunk_words(gstart, result):
                 txt = w.get("word", "")
                 if txt.strip():
                     words.append({"start": float(w["start"]) + gstart,
-                                  "end": float(w["end"]) + gstart, "word": txt})
+                                  "end": float(w["end"]) + gstart, "word": txt,
+                                  "prob": float(w.get("probability", 1.0))})
         elif seg.get("text", "").strip():
             words.append({"start": float(seg["start"]) + gstart,
-                          "end": float(seg["end"]) + gstart, "word": " " + seg["text"].strip()})
+                          "end": float(seg["end"]) + gstart, "word": " " + seg["text"].strip(),
+                          # real 0–1 proxy (exp of the segment's mean token logprob),
+                          # matching the word-level `probability` scale
+                          "prob": max(0.0, min(1.0, math.exp(seg.get("avg_logprob", -0.7))))})
     return words
 
 
@@ -430,6 +446,54 @@ def collapse_repeats(segments):
 
 
 # ---------------------------------------------------------------------------
+# Review document — the source of truth the Review & Polish window renders and
+# re-exports from. Per-word text + timing + confidence, plus paragraph-break
+# flags (same rule as words_to_paragraphs) so the window can show readable
+# paragraphs while still colouring/editing at the word level.
+# ---------------------------------------------------------------------------
+
+def build_review_doc(words, meta, gap=1.4, hard_gap=2.6, max_chars=550):
+    flags = [False] * len(words)
+    cur = []
+    for i, w in enumerate(words):
+        if cur:
+            pause = w["start"] - cur[-1]["end"]
+            text = "".join(x["word"] for x in cur).strip()
+            ends = text[-1:] in ".?!"
+            if (pause >= gap and ends) or pause >= hard_gap or (len(text) >= max_chars and ends):
+                flags[i] = True
+                cur = []
+        cur.append(w)
+    return {
+        "meta": meta,
+        "words": [{"w": w["word"], "s": round(w["start"], 3), "e": round(w["end"], 3),
+                   "p": round(w.get("prob", 1.0), 4), "pb": flags[i]}
+                  for i, w in enumerate(words)],
+    }
+
+
+def reexport_from_doc(doc):
+    """Regenerate txt/ttxt/srt from a (possibly edited) review doc, reusing the
+    same writers as a normal run so output format never diverges."""
+    words = [{"word": x["w"], "start": x["s"], "end": x["e"]} for x in doc["words"]]
+    paragraphs = collapse_repeats(words_to_paragraphs(words))
+    cues = collapse_repeats(words_to_cues(words))
+    meta = doc.get("meta", {})
+    base = doc.get("base", meta.get("base"))
+    out_dir = doc.get("output_dir", meta.get("output_dir"))
+    doc["formats"] = doc.get("formats", meta.get("formats", ["txt"]))
+    os.makedirs(out_dir, exist_ok=True)
+    outputs = []
+    if "txt" in doc["formats"]:
+        p = os.path.join(out_dir, base + ".txt"); write_paragraph_txt(p, paragraphs); outputs.append(p)
+    if "ttxt" in doc["formats"]:
+        p = os.path.join(out_dir, base + "_timestamped.txt"); write_paragraph_ttxt(p, paragraphs); outputs.append(p)
+    if "srt" in doc["formats"]:
+        p = os.path.join(out_dir, base + ".srt"); write_srt(p, cues); outputs.append(p)
+    return outputs
+
+
+# ---------------------------------------------------------------------------
 # Per-file driver
 # ---------------------------------------------------------------------------
 
@@ -496,9 +560,21 @@ def process_file(path, file_index, total_files, opts, out_name=None):
             outputs.append(p)
 
         lang = chunk_results[0][1].get("language") if chunk_results else None
+
+        review_doc_path = None
+        review_dir = getattr(opts, "review_dir", None)
+        if review_dir:
+            os.makedirs(review_dir, exist_ok=True)
+            meta = {"base": base, "source": name, "duration": duration,
+                    "model": opts.model, "language": lang, "output_dir": out_dir,
+                    "formats": formats, "vocab": opts.initial_prompt or ""}
+            fn = f"{base}-{int(time.time() * 1000)}.review.json"
+            review_doc_path = os.path.join(review_dir, fn)
+            _atomic_write(review_doc_path, json.dumps(build_review_doc(words, meta)))
+
         _emit({
             "type": "done", "file": name, "file_path": path, "outputs": outputs,
-            "segments": len(paragraphs), "duration": duration,
+            "segments": len(paragraphs), "duration": duration, "review_doc": review_doc_path,
             "chunks": len(chunks), "language": lang, "output_dir": out_dir,
         })
         return True
@@ -980,9 +1056,23 @@ def main():
                    help="report which models are cached, then exit")
     p.add_argument("--download-models", action="store_true",
                    help="download all models for offline use, then exit")
+    p.add_argument("--review-dir", default=None, metavar="DIR",
+                   help="write a per-file <base>.review.json (words+timing+confidence) here for the Review & Polish window")
+    p.add_argument("--reexport", default=None, metavar="JSON",
+                   help="regenerate txt/ttxt/srt from an edited review doc, then exit")
     opts = p.parse_args()
 
     _ipc_mode = opts.ipc
+
+    if opts.reexport:
+        try:
+            with open(opts.reexport, encoding="utf-8") as f:
+                doc = json.load(f)
+            outputs = reexport_from_doc(doc)
+            _emit({"type": "reexport_done", "outputs": outputs, "output_dir": doc.get("meta", {}).get("output_dir")})
+        except Exception as e:
+            _emit({"type": "error", "file": "reexport", "message": str(e)})
+        return
 
     # Guard a flag combo that would otherwise floor the chunk step at 1s and
     # explode a long file into thousands of chunks (a multi-hour hang).

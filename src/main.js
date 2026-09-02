@@ -73,6 +73,15 @@ class SettingsStore {
       outputSrt: true,
       autoOpenOnComplete: true,
       skin: 'professional',        // professional | fun
+      // Review & Polish
+      postProcess: true,           // emit a review doc + enable the polish window
+      reviewAutoOpen: true,        // open the Review window when a file finishes
+      polishMode: 'stepwise',      // stepwise (verify each) | madmax (apply unattended)
+      corrections: [],             // [[from, to], …] deterministic whole-word fixes
+      fillerRemove: false,         // sweep filler words
+      fillerWords: ['um', 'uh', 'er', 'ah', 'you know', 'i mean', 'sort of', 'kind of'],
+      confidenceCheck: false,      // prompt for words below the threshold
+      confidenceThreshold: 0.5,    // 0–1 word probability
     };
   }
 
@@ -231,6 +240,7 @@ class TranscriptionJob {
     ];
     if (this.vocabHint) args.push('--initial-prompt', this.vocabHint);
     if (this.language)  args.push('--language', this.language);
+    if (this.reviewDir && !this.multitrack) args.push('--review-dir', this.reviewDir);
     if (this.multitrack) {
       args.push('--multitrack');
       args.push('--speakers', JSON.stringify(this.speakers || []));
@@ -300,6 +310,9 @@ class TranscriptionJob {
     if (msg.type === 'error')      log('error', `[backend error] ${msg.file || ''}: ${msg.message || ''}`);
     else if (msg.type === 'warn')  log('warn',  `[backend warn] ${msg.file || ''}: ${msg.message || ''}`);
     this._send('transcription:message', msg);
+    if (msg.type === 'done' && msg.review_doc && global.settings && global.settings.get('reviewAutoOpen')) {
+      openReviewWindow(msg.review_doc);
+    }
   }
 
   _send(channel, payload) {
@@ -420,6 +433,52 @@ function createWindow() {
 }
 
 // ---------------------------------------------------------------------------
+// Review & Polish window — one window; a new finished file replaces its doc.
+// ---------------------------------------------------------------------------
+
+let reviewWindow = null;
+let pendingReviewDoc = null;
+
+function openReviewWindow(docPath) {
+  pendingReviewDoc = docPath;
+  if (reviewWindow && !reviewWindow.isDestroyed()) {
+    reviewWindow.webContents.send('review:opendoc', docPath);
+    reviewWindow.focus();
+    return;
+  }
+  reviewWindow = new BrowserWindow({
+    width: 940,
+    height: 720,
+    minWidth: 720,
+    minHeight: 520,
+    backgroundColor: '#070910',
+    title: 'Review & Polish',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+  reviewWindow.loadFile(path.join(__dirname, 'renderer', 'review.html'));
+  reviewWindow.on('closed', () => { reviewWindow = null; });
+}
+
+// Review docs are written per finished file and never consumed by anything but
+// the window; cap the directory so it can't grow without bound.
+function pruneReviews(keep = 40) {
+  try {
+    const dir = path.join(app.getPath('userData'), 'reviews');
+    if (!fs.existsSync(dir)) return;
+    fs.readdirSync(dir).filter((f) => f.endsWith('.review.json'))
+      .map((f) => ({ f, t: fs.statSync(path.join(dir, f)).mtimeMs }))
+      .sort((a, b) => b.t - a.t)
+      .slice(keep)
+      .forEach((x) => { try { fs.unlinkSync(path.join(dir, x.f)); } catch (_) {} });
+  } catch (_) {}
+}
+
+// ---------------------------------------------------------------------------
 // App lifecycle
 // ---------------------------------------------------------------------------
 
@@ -438,6 +497,7 @@ app.whenReady().then(() => {
     global.logger.info(`Defaulted output folder to ${defaultOut}`);
   }
 
+  pruneReviews();
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -459,6 +519,60 @@ app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(
 ipcMain.handle('settings:getAll', () => global.settings.getAll());
 ipcMain.handle('settings:set', (e, key, value) => { global.settings.set(key, value); return true; });
 ipcMain.handle('settings:setAll', (e, obj) => { global.settings.setAll(obj); return true; });
+
+// --- Review & Polish ---
+ipcMain.handle('review:open', (e, docPath) => {
+  if (docPath && fs.existsSync(docPath)) { openReviewWindow(docPath); return { ok: true }; }
+  return { ok: false, error: 'Review data no longer available for this file.' };
+});
+ipcMain.handle('review:pending', () => pendingReviewDoc);
+ipcMain.handle('review:load', (e, docPath) => {
+  try { return { ok: true, doc: JSON.parse(fs.readFileSync(docPath, 'utf8')), path: docPath }; }
+  catch (err) { return { ok: false, error: err.message }; }
+});
+ipcMain.handle('review:reexport', async (e, editedDoc) => {
+  // Round-trip the edited doc through the backend so txt/ttxt/srt come from the
+  // same writers as a normal run.
+  const tmp = path.join(app.getPath('temp'), `echoscribe-reexport-${Date.now()}.json`);
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(editedDoc), 'utf8');
+    const ffmpegDir = resolveFfmpegDir();
+    const args = ['--ipc', '--reexport', tmp];
+    if (ffmpegDir) args.push('--ffmpeg-path', ffmpegDir);
+    const outputs = await new Promise((resolve, reject) => {
+      const proc = spawnBackend(args);
+      let out = '', settled = false;
+      const done = (fn, v) => { if (!settled) { settled = true; clearTimeout(timer); fn(v); } };
+      const timer = setTimeout(() => { try { proc.kill(); } catch (_) {} done(reject, new Error('reexport timed out')); }, 30000);
+      proc.stdout.on('data', (d) => (out += d.toString()));
+      proc.stderr.on('data', (d) => log('warn', `reexport stderr: ${d.toString().trim()}`));
+      proc.on('error', (err) => done(reject, err));
+      proc.on('close', () => {
+        for (const line of out.split('\n')) {
+          try {
+            const msg = JSON.parse(line.trim());
+            if (msg.type === 'reexport_done') return done(resolve, msg.outputs || []);
+            if (msg.type === 'error') return done(reject, new Error(msg.message));
+          } catch (_) {}
+        }
+        done(reject, new Error('reexport produced no result'));
+      });
+    });
+    return { ok: true, outputs };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  } finally {
+    try { fs.unlinkSync(tmp); } catch (_) {}
+  }
+});
+ipcMain.handle('review:writeLog', (e, dir, base, text) => {
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const p = path.join(dir, `${base}.polish-log.txt`);
+    fs.writeFileSync(p, text, 'utf8');
+    return { ok: true, path: p };
+  } catch (err) { return { ok: false, error: err.message }; }
+});
 
 // --- File dialogs ---
 ipcMain.handle('dialog:openFiles', async () => {
@@ -586,6 +700,8 @@ ipcMain.handle('transcription:start', async (e, payload) => {
       perSpeaker: perSpeaker !== false,
       scriptTimestamps: scriptTimestamps !== false,
       outNames: Array.isArray(outNames) ? outNames : [],
+      reviewDir: global.settings && global.settings.get('postProcess')
+        ? path.join(app.getPath('userData'), 'reviews') : null,
       win: mainWindow,
     });
     currentJob.start();

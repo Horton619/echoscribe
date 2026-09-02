@@ -28,6 +28,8 @@ Plus `src/preload.js` exposes the renderer-facing API (`window.echoscribe`).
 | `--session-name NAME` | Base name for merged script |
 | `--per-speaker` | Also write each track's own transcript |
 | `--script-timestamps yes\|no` | `[HH:MM:SS]` prefixes in the merged script .txt (default yes) |
+| `--review-dir DIR` | Write a per-file `<base>-<ms>.review.json` (words + timing + confidence) here for the Review & Polish window; batch mode only |
+| `--reexport JSON` | One-shot: regenerate txt/ttxt/srt from an (edited) review doc, then exit |
 | `--probe FILE` | One-shot: duration + chunk plan, then exit |
 | `--preflight` | One-shot: check ffmpeg + mlx-whisper + transcription smoke test, then exit |
 | `--models-status` | One-shot: report which models are cached, then exit |
@@ -40,7 +42,8 @@ Plus `src/preload.js` exposes the renderer-facing API (`window.echoscribe`).
 | `media_info` | file, duration, chunks | per file, before transcription starts |
 | `start` | file, file_index, total_files; (`multitrack`, `tracks`) | per file / per session |
 | `progress` | file, chunk, total_chunks, percent, message | during transcription |
-| `done` | file, outputs[], segments, output_dir; (`multitrack`, `speakers`) | per file / per session |
+| `done` | file, outputs[], segments, output_dir, `review_doc` (path or null); (`multitrack`, `speakers`) | per file / per session |
+| `reexport_done` | outputs[], output_dir | `--reexport` only |
 | `warn` | message, file | non-fatal notes |
 | `error` | file, message | per-file failure |
 | `batch_done` | transcribed, errors | end of the whole run |
@@ -59,11 +62,23 @@ cached — so preflight never triggers a multi-GB download or needs the network.
 Renderer → main (invoke): `settings:*`, `dialog:openFiles`, `dialog:openFolder`,
 `shell:openFolder`, `shell:revealFile`, `media:scan`, `media:probe`,
 `transcription:start`, `transcription:cancel`, `preflight:run`, `log:*`,
-`app:*`, `update:*`.
+`app:*`, `update:*`, `review:*` (`review:pending`, `review:load`,
+`review:reexport`, `review:writeLog` — used by the Review & Polish window).
 
 Main → renderer (send): `transcription:message` (carries every NDJSON object),
 `transcription:stderr`, `transcription:exit`, `transcription:spawn_error`,
-`preflight:result`, `update:status`.
+`preflight:result`, `update:status`, `review:opendoc` (a newly-finished file's
+review doc, sent to an already-open Review window).
+
+## Review & Polish window
+
+A separate BrowserWindow (`src/renderer/review.html` + `review.js`). When a file
+finishes with `postProcess` on, the backend writes a review doc and `main.js`
+auto-opens (or re-points) this window. The window renders the doc, runs the
+corrections / filler / phonetic sweep in the renderer, and on save sends the
+edited doc back through `review:reexport` (backend `--reexport`) so output files
+come from the same writers as a normal run. Review docs live in
+`userData/reviews/` and are pruned to the newest 40 at startup.
 
 ## Renderer group logic
 

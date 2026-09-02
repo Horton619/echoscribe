@@ -290,6 +290,13 @@ function renderQueue() {
     el.appendChild(main);
 
     if (item.status === 'done' && item.outputs && item.outputs.length) {
+      if (item.reviewDoc) {
+        const rev = document.createElement('button');
+        rev.className = 'qi-done-link';
+        rev.textContent = 'Review';
+        rev.addEventListener('click', () => { api.review.open(item.reviewDoc); flashOk(rev, '✓'); });
+        el.appendChild(rev);
+      }
       const link = document.createElement('button');
       link.className = 'qi-done-link';
       link.textContent = 'Reveal';
@@ -557,7 +564,7 @@ function handleMessage(msg) {
         state.queue.forEach((q) => { q.status = 'done'; q.outputs = msg.outputs; });
       } else {
         const it = itemForMsg(msg);
-        if (it) { it.status = 'done'; it.pct = 100; it.outputs = msg.outputs; }
+        if (it) { it.status = 'done'; it.pct = 100; it.outputs = msg.outputs; it.reviewDoc = msg.review_doc; }
       }
       setProgress(overallPct(), $('progress-overall-text').textContent, `✓ ${msg.file}`);
       renderQueue();
@@ -627,11 +634,15 @@ function hydrateSettingsModal() {
   $('setting-overlap').value = state.settings.overlap ?? 10;
   $('setting-language').value = state.settings.language || '';
   $('setting-auto-open').checked = state.settings.autoOpenOnComplete !== false;
+  $('setting-postprocess').checked = state.settings.postProcess !== false;
+  $('setting-review-autoopen').checked = state.settings.reviewAutoOpen !== false;
 
   $('setting-chunk').addEventListener('change', () => { state.settings.chunkLength = clampNum($('setting-chunk').value, 30, 1800, 300); api.setSetting('chunkLength', state.settings.chunkLength); reprobeAll(); });
   $('setting-overlap').addEventListener('change', () => { state.settings.overlap = clampNum($('setting-overlap').value, 0, 60, 10); api.setSetting('overlap', state.settings.overlap); reprobeAll(); });
   $('setting-language').addEventListener('change', () => { state.settings.language = $('setting-language').value.trim(); api.setSetting('language', state.settings.language); });
   $('setting-auto-open').addEventListener('change', () => { state.settings.autoOpenOnComplete = $('setting-auto-open').checked; api.setSetting('autoOpenOnComplete', state.settings.autoOpenOnComplete); });
+  $('setting-postprocess').addEventListener('change', () => { state.settings.postProcess = $('setting-postprocess').checked; api.setSetting('postProcess', state.settings.postProcess); });
+  $('setting-review-autoopen').addEventListener('change', () => { state.settings.reviewAutoOpen = $('setting-review-autoopen').checked; api.setSetting('reviewAutoOpen', state.settings.reviewAutoOpen); });
 }
 
 function clampNum(v, min, max, dflt) {

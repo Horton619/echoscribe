@@ -85,4 +85,20 @@ contextBridge.exposeInMainWorld('echoscribe', {
   downloadUpdate: () => ipcRenderer.invoke('update:download'),
   installUpdate: () => ipcRenderer.send('update:install'),
   onUpdateStatus: makeListener('update:status'),
+
+  // --- Review & Polish window ---
+  review: {
+    /** Open (or re-point) the Review window to a specific review doc. */
+    open: (docPath) => ipcRenderer.invoke('review:open', docPath),
+    /** Path of the doc the window was opened for (call on load). */
+    pending: () => ipcRenderer.invoke('review:pending'),
+    /** Read + parse a review doc: {ok, doc, path}. */
+    load: (docPath) => ipcRenderer.invoke('review:load', docPath),
+    /** Regenerate txt/ttxt/srt from an edited doc: {ok, outputs}. */
+    reexport: (doc) => ipcRenderer.invoke('review:reexport', doc),
+    /** Write <base>.polish-log.txt into dir: {ok, path}. */
+    writeLog: (dir, base, text) => ipcRenderer.invoke('review:writeLog', dir, base, text),
+    /** Fired when a new finished file should replace the window's doc. */
+    onOpenDoc: makeListener('review:opendoc'),
+  },
 });

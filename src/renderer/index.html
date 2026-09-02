@@ -160,8 +160,8 @@
     <div class="settings-panel" role="dialog" aria-modal="true" aria-label="Settings">
       <div class="settings-header">
         <div class="settings-tabs">
-          <button class="settings-tab active" data-tab="appearance">Appearance</button>
-          <button class="settings-tab" data-tab="transcription">Transcription</button>
+          <button class="settings-tab active" data-tab="transcription">Transcription</button>
+          <button class="settings-tab" data-tab="appearance">Appearance</button>
           <button class="settings-tab" data-tab="diagnostics">Diagnostics</button>
         </div>
         <button class="settings-close" id="btn-settings-close">&#10005;</button>
@@ -170,7 +170,7 @@
       <div class="settings-body">
 
         <!-- Appearance -->
-        <div class="settings-pane active" id="tab-appearance">
+        <div class="settings-pane" id="tab-appearance">
           <div class="settings-section-label">Skin</div>
           <div class="skin-options">
             <button class="skin-option" data-skin="professional">
@@ -185,7 +185,7 @@
         </div>
 
         <!-- Transcription -->
-        <div class="settings-pane" id="tab-transcription">
+        <div class="settings-pane active" id="tab-transcription">
           <div class="settings-row">
             <div class="settings-row-label">Chunk length</div>
             <div class="settings-row-control">
@@ -216,6 +216,21 @@
               <span class="toggle-track"></span>
             </label>
           </div>
+          <div class="settings-row settings-row-inline">
+            <div class="settings-row-label">Post-processing (corrections, fillers, confidence review)</div>
+            <label class="toggle-label">
+              <input type="checkbox" id="setting-postprocess">
+              <span class="toggle-track"></span>
+            </label>
+          </div>
+          <div class="settings-row settings-row-inline">
+            <div class="settings-row-label">Auto-open Review &amp; Polish window when a file finishes</div>
+            <label class="toggle-label">
+              <input type="checkbox" id="setting-review-autoopen">
+              <span class="toggle-track"></span>
+            </label>
+          </div>
+          <div class="settings-hint">Post-processing writes a review of each transcript (corrections, filler removal, confidence highlighting). Auto-open needs it on.</div>
         </div>
 
         <!-- Diagnostics -->

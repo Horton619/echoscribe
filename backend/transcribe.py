@@ -316,6 +316,78 @@ def merge_words(chunk_results, overlap):
     return merged
 
 
+# ---------------------------------------------------------------------------
+# Second sweep: repair Whisper word-alignment collapses.
+#
+# On some segments (more likely inside a long chunk), Whisper's DTW word
+# alignment fails and dumps a run of words onto a single timestamp — the text
+# there comes out garbled ("…nice, tight, tight bale system…" for "we've changed
+# our mesh system"). Re-transcribing just that few-second window in isolation
+# aligns cleanly, so after the first pass we detect the pile-ups and splice a
+# fresh transcription of each over the top.
+# ---------------------------------------------------------------------------
+
+def _find_collapses(words, min_run=4, span=0.15):
+    """Runs of >= min_run consecutive words whose starts pile up within `span`
+    seconds — impossible in real speech, so a reliable alignment-failure signal."""
+    out, i, n = [], 0, len(words)
+    while i < n:
+        j = i
+        while j + 1 < n and words[j + 1]["start"] - words[i]["start"] <= span:
+            j += 1
+        if j - i + 1 >= min_run:
+            out.append((i, j)); i = j + 1
+        else:
+            i += 1
+    return out
+
+
+def _snap_boundary(words, t, search=1.0, min_gap=0.15):
+    """Nudge a cut time to the quietest word-gap within `search` seconds so the
+    repaired window starts/ends in silence — no word gets cut at the splice."""
+    best, best_gap = t, min_gap
+    for a, b in zip(words, words[1:]):
+        gap = b["start"] - a["end"]
+        mid = (a["end"] + b["start"]) / 2.0
+        if abs(mid - t) <= search and gap >= best_gap:
+            best_gap, best = gap, mid
+    return best
+
+
+def repair_collapses(words, path, opts, ffmpeg_bin, pad=2.5, max_passes=2):
+    # Iterate a couple of times: a repaired window can occasionally re-collapse,
+    # so a second pass catches it; the bound stops a genuinely stubborn spot from
+    # looping forever (it's left for manual review instead).
+    tmpdir = tempfile.mkdtemp(prefix="echoscribe_rep_")
+    total = 0
+    try:
+        for p in range(max_passes):
+            clusters = _find_collapses(words)
+            if not clusters:
+                break
+            fixed_this = 0
+            for (a, b) in reversed(clusters):   # back-to-front keeps earlier times valid
+                lo = _snap_boundary(words, max(0.0, words[a]["start"] - pad))
+                hi = _snap_boundary(words, words[b]["start"] + pad)
+                if hi - lo < 0.5:
+                    continue
+                wav = os.path.join(tmpdir, f"rep_{int(lo * 1000)}_{p}.wav")
+                extract_chunk(path, lo, hi - lo, wav, ffmpeg_bin)
+                iso = _chunk_words(lo, transcribe_chunk(wav, opts.model, opts.initial_prompt, opts.language))
+                iso = [w for w in iso if lo <= (w["start"] + w["end"]) / 2.0 <= hi]
+                if not iso:
+                    continue
+                words = [w for w in words if (w["start"] + w["end"]) / 2.0 < lo] + iso \
+                    + [w for w in words if (w["start"] + w["end"]) / 2.0 >= hi]
+                fixed_this += 1
+            total += fixed_this
+            if fixed_this == 0:
+                break
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    return words, total
+
+
 def _wjoin(words):
     return {"start": words[0]["start"], "end": words[-1]["end"],
             "text": "".join(w["word"] for w in words).strip()}
@@ -533,11 +605,16 @@ def process_file(path, file_index, total_files, opts, out_name=None):
             chunk_results.append((gstart, result))
             os.unlink(wav)
 
-        # Word-level: clean seams, drop words that fall in detected silence
-        # (kills over-quiet hallucinations at the source), then re-segment into
-        # readable paragraphs and subtitle cues (collapse any residual repeats).
-        words = filter_silence(merge_words(chunk_results, opts.overlap),
-                               detect_silences(path, ffmpeg_bin))
+        # Word-level: clean seams, repair any alignment collapses (second sweep),
+        # then drop words that fall in detected silence (kills over-quiet
+        # hallucinations), then re-segment into readable paragraphs + subtitle cues.
+        words = merge_words(chunk_results, opts.overlap)
+        words, repaired = repair_collapses(words, path, opts, ffmpeg_bin)
+        if repaired:
+            _emit({"type": "progress", "file": name, "file_path": path,
+                   "chunk": len(chunks), "total_chunks": len(chunks), "percent": 99,
+                   "message": f"repaired {repaired} garbled section{'s' if repaired != 1 else ''}…"})
+        words = filter_silence(words, detect_silences(path, ffmpeg_bin))
         paragraphs = collapse_repeats(words_to_paragraphs(words))
         cues = collapse_repeats(words_to_cues(words))
 
@@ -565,9 +642,9 @@ def process_file(path, file_index, total_files, opts, out_name=None):
         review_dir = getattr(opts, "review_dir", None)
         if review_dir:
             os.makedirs(review_dir, exist_ok=True)
-            meta = {"base": base, "source": name, "duration": duration,
-                    "model": opts.model, "language": lang, "output_dir": out_dir,
-                    "formats": formats, "vocab": opts.initial_prompt or ""}
+            meta = {"base": base, "source": name, "source_path": os.path.abspath(path),
+                    "duration": duration, "model": opts.model, "language": lang,
+                    "output_dir": out_dir, "formats": formats, "vocab": opts.initial_prompt or ""}
             fn = f"{base}-{int(time.time() * 1000)}.review.json"
             review_doc_path = os.path.join(review_dir, fn)
             _atomic_write(review_doc_path, json.dumps(build_review_doc(words, meta)))

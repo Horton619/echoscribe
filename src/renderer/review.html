@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self';">
+        content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; media-src file: 'self';">
   <title>Review &amp; Polish</title>
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="review.css">
@@ -59,8 +59,15 @@
     </aside>
   </main>
 
+  <audio id="raudio" preload="metadata"></audio>
   <footer class="review-footer">
-    <div class="review-status" id="review-status"></div>
+    <div class="review-footer-left">
+      <div class="review-player" id="review-player" hidden>
+        <button class="player-btn" id="player-toggle" title="Play / pause (Space)" aria-label="Play or pause">&#9654;</button>
+        <span class="player-time" id="player-time">0:00</span>
+      </div>
+      <div class="review-status" id="review-status"></div>
+    </div>
     <div class="review-footer-actions">
       <button class="btn-review-secondary" id="btn-revert" hidden>Revert all</button>
       <button class="btn-review-primary" id="btn-save" disabled>Save &amp; export</button>

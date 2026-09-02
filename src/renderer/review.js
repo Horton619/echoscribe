@@ -8,6 +8,8 @@
 
 const api = window.echoscribe;
 const $ = (id) => document.getElementById(id);
+let playClickTimer = null, curPlaySpan = null;
+const fileUrl = (p) => 'file://' + p.split('/').map(encodeURIComponent).join('/');
 
 const state = {
   docPath: null,
@@ -98,6 +100,7 @@ async function loadDoc(docPath) {
   }));
   state.suggestions = [];
   $('review-docname').textContent = state.meta.source || state.meta.base || '(transcript)';
+  setupAudio();
   showPanel('idle');
   $('btn-save').disabled = true;
   $('btn-revert').hidden = true;
@@ -115,6 +118,8 @@ function render() {
   const wrap = $('transcript');
   wrap.innerHTML = '';
   closeMenu();
+  closeSelMenu();
+  curPlaySpan = null;   // spans are rebuilt; the play-highlight re-attaches on next timeupdate
   const fset = fillerSet();
   const thr = parseFloat($('conf-threshold').value) || 0;
   let para = document.createElement('p');
@@ -143,8 +148,9 @@ function buildWord(w, fset, thr) {
   } else {
     sp.className = 'wd ' + `cf-${confBucket(w.p)}` + (w.p < thr ? ' cf-flag' : '') + (fset.has(norm(w.text)) ? ' wd-filler' : '');
     sp.textContent = w.text;
-    sp.title = `${(w.p * 100).toFixed(0)}% · ${fmtT(w.s)} — double-click to edit`;
-    sp.addEventListener('dblclick', () => editWord(w.i));
+    sp.title = `${(w.p * 100).toFixed(0)}% · ${fmtT(w.s)} — click to play, double-click to edit`;
+    sp.addEventListener('click', () => schedulePlay(w.s));
+    sp.addEventListener('dblclick', () => { clearTimeout(playClickTimer); editWord(w.i); });
   }
   return sp;
 }
@@ -450,14 +456,102 @@ function showMenu(spanEl, i) {
   const r = spanEl.getBoundingClientRect();
   menuEl = document.createElement('div');
   menuEl.className = 'mod-menu';
-  menuEl.innerHTML = `<button data-a="undo">Undo</button><button data-a="edit">Edit…</button>`;
+  const playBtn = state.meta.source_path ? '<button data-a="play">▶ Play</button>' : '';
+  menuEl.innerHTML = `${playBtn}<button data-a="undo">Undo</button><button data-a="edit">Edit…</button>`;
   document.body.appendChild(menuEl);
-  menuEl.style.left = `${Math.min(r.left, window.innerWidth - 140)}px`;
+  menuEl.style.left = `${Math.min(r.left, window.innerWidth - 160)}px`;
   menuEl.style.top = `${r.bottom + 4}px`;
+  if (state.meta.source_path) menuEl.querySelector('[data-a="play"]').onclick = (e) => { e.stopPropagation(); closeMenu(); playFrom(state.words[i].s); };
   menuEl.querySelector('[data-a="undo"]').onclick = (e) => { e.stopPropagation(); closeMenu(); undo(i); };
   menuEl.querySelector('[data-a="edit"]').onclick = (e) => { e.stopPropagation(); closeMenu(); editWord(i); };
 }
 document.addEventListener('click', (e) => { if (menuEl && !menuEl.contains(e.target) && !e.target.classList.contains('wd-mod') && !e.target.closest('.wd-mod')) closeMenu(); });
+
+// ------------------------------------------------- multi-word selection edit
+// Select a span of words → a Replace / Delete toolbar. Fixes a garbled stretch
+// (e.g. a Whisper alignment collapse) that single-word editing can't.
+let selMenu = null;
+function closeSelMenu() { if (selMenu) { selMenu.remove(); selMenu = null; } }
+function wordIdxOf(node) {
+  const el = node && (node.nodeType === 3 ? node.parentElement : node);
+  const wd = el && el.closest && el.closest('.wd');
+  return wd && wd.dataset.i !== undefined ? +wd.dataset.i : null;
+}
+function onTranscriptSelect() {
+  setTimeout(() => {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || !sel.rangeCount) { closeSelMenu(); return; }
+    const range = sel.getRangeAt(0);
+    if (!$('transcript').contains(range.commonAncestorContainer)) { closeSelMenu(); return; }
+    let i = wordIdxOf(range.startContainer), j = wordIdxOf(range.endContainer);
+    if (i === null || j === null) { closeSelMenu(); return; }
+    if (i > j) { const t = i; i = j; j = t; }
+    if (i === j) { closeSelMenu(); return; }   // single word → double-click edit handles it
+    showSelMenu(range.getBoundingClientRect(), i, j);
+  }, 10);
+}
+function showSelMenu(rect, i, j) {
+  closeSelMenu();
+  selMenu = document.createElement('div');
+  selMenu.className = 'mod-menu';
+  const playBtn = state.meta.source_path ? '<button data-a="play">▶ Play</button>' : '';
+  selMenu.innerHTML = `${playBtn}<button data-a="replace">Replace…</button><button data-a="delete">Delete</button>`;
+  document.body.appendChild(selMenu);
+  selMenu.style.left = `${Math.min(Math.max(4, rect.left), window.innerWidth - 220)}px`;
+  selMenu.style.top = `${rect.bottom + 6}px`;
+  if (playBtn) selMenu.querySelector('[data-a="play"]').onclick = (e) => { e.stopPropagation(); closeSelMenu(); playFrom(state.words[i].s); };
+  selMenu.querySelector('[data-a="replace"]').onclick = (e) => { e.stopPropagation(); closeSelMenu(); editRange(i, j); };
+  selMenu.querySelector('[data-a="delete"]').onclick = (e) => { e.stopPropagation(); closeSelMenu(); deleteRange(i, j); };
+}
+const rangeText = (i, j) => state.words.slice(i, j + 1).filter((w) => !w.hidden).map((w) => w.text).join('').trim();
+function editRange(i, j) {
+  const first = state.words[i];
+  const orig = rangeText(i, j);
+  const span = document.querySelector(`.wd[data-i="${i}"]`);
+  if (!span) return;
+  const input = document.createElement('input');
+  input.className = 'wd-edit'; input.value = orig;
+  input.style.width = `${Math.min(60, Math.max(6, orig.length + 1))}ch`;
+  span.replaceWith(input); input.focus(); input.select();
+  let settled = false;
+  const finish = (commit) => {
+    if (settled) return; settled = true;
+    const next = input.value.trim();
+    if (commit && next) {
+      applyCorrection(first, next, orig, 'edit');
+      first.group = [];
+      for (let k = i + 1; k <= j; k++) { const w = state.words[k]; w.removed = true; w.hidden = true; first.group.push(k); }
+    }
+    render(); refreshDirty();
+  };
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(false); }
+  });
+  input.addEventListener('blur', () => finish(true));
+}
+function deleteRange(i, j) { for (let k = i; k <= j; k++) applyRemove(state.words[k], 'remove'); render(); refreshDirty(); }
+document.addEventListener('click', (e) => { if (selMenu && !selMenu.contains(e.target)) closeSelMenu(); });
+
+// ---------------------------------------------------------------- audio sync
+function setupAudio() {
+  const a = $('raudio'); curPlaySpan = null;
+  if (state.meta.source_path) { a.src = fileUrl(state.meta.source_path); $('review-player').hidden = false; }
+  else { a.removeAttribute('src'); $('review-player').hidden = true; }
+  $('player-time').textContent = '0:00';
+}
+function schedulePlay(t) { clearTimeout(playClickTimer); playClickTimer = setTimeout(() => playFrom(t), 200); }
+function playFrom(t) { const a = $('raudio'); if (!a.getAttribute('src')) return; try { a.currentTime = Math.max(0, t); a.play(); } catch (_) {} }
+function togglePlay() { const a = $('raudio'); if (!a.getAttribute('src')) return; a.paused ? a.play() : a.pause(); }
+function highlightPlaying(ct) {
+  let idx = -1;
+  for (let i = 0; i < state.words.length; i++) { if (state.words[i].s <= ct) idx = i; else break; }
+  const span = idx >= 0 ? document.querySelector(`.wd[data-i="${idx}"]`) : null;
+  if (span === curPlaySpan) return;
+  if (curPlaySpan) curPlaySpan.classList.remove('wd-playing');
+  if (span) span.classList.add('wd-playing');
+  curPlaySpan = span;
+}
 
 // ---------------------------------------------------------------- lists editor
 function openLists() {
@@ -500,7 +594,16 @@ function bindUI() {
   $('tg-fillers').addEventListener('change', (e) => document.body.classList.toggle('show-fillers', e.target.checked));
   $('tg-conf-check').addEventListener('change', (e) => { document.body.classList.toggle('show-flags', e.target.checked); $('threshold-wrap').classList.toggle('on', e.target.checked); render(); });
   $('conf-threshold').addEventListener('change', () => { render(); api.setSetting('confidenceThreshold', parseFloat($('conf-threshold').value) || 0.5); });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeMenu(); const o = $('lists-overlay'); if (!o.classList.contains('hidden')) o.classList.add('hidden'); } });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { closeMenu(); const o = $('lists-overlay'); if (!o.classList.contains('hidden')) o.classList.add('hidden'); }
+    else if (e.key === ' ' && !/^(INPUT|TEXTAREA)$/.test(e.target.tagName || '')) { e.preventDefault(); togglePlay(); }
+  });
+  const a = $('raudio');
+  a.addEventListener('timeupdate', () => { highlightPlaying(a.currentTime); $('player-time').textContent = fmtT(a.currentTime); });
+  a.addEventListener('play', () => { $('player-toggle').textContent = '⏸'; });
+  a.addEventListener('pause', () => { $('player-toggle').textContent = '▶'; });
+  $('player-toggle').addEventListener('click', togglePlay);
+  $('transcript').addEventListener('mouseup', onTranscriptSelect);
   $('btn-sweep').addEventListener('click', runSweep);
   $('btn-save').addEventListener('click', save);
   $('btn-revert').addEventListener('click', revertAll);

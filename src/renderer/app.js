@@ -860,6 +860,10 @@ function wireEvents() {
 
   // Settings
   $('btn-settings').addEventListener('click', openSettings);
+  $('btn-open-review').addEventListener('click', async () => {
+    const files = await api.openFilePicker();
+    if (files.length) api.review.openForFile(files[0]);
+  });
   $('btn-settings-close').addEventListener('click', closeSettings);
   $('btn-settings-done').addEventListener('click', closeSettings);
   $('settings-overlay').addEventListener('click', (e) => { if (e.target === $('settings-overlay')) closeSettings(); });

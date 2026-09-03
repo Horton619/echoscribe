@@ -90,6 +90,8 @@ contextBridge.exposeInMainWorld('echoscribe', {
   review: {
     /** Open (or re-point) the Review window to a specific review doc. */
     open: (docPath) => ipcRenderer.invoke('review:open', docPath),
+    /** Open the saved review for a source media file (info dialog if none): {ok}. */
+    openForFile: (filePath) => ipcRenderer.invoke('review:openForFile', filePath),
     /** Path of the doc the window was opened for (call on load). */
     pending: () => ipcRenderer.invoke('review:pending'),
     /** Read + parse a review doc: {ok, doc, path}. */

@@ -525,6 +525,33 @@ ipcMain.handle('review:open', (e, docPath) => {
   if (docPath && fs.existsSync(docPath)) { openReviewWindow(docPath); return { ok: true }; }
   return { ok: false, error: 'Review data no longer available for this file.' };
 });
+// Open the newest saved review doc for a given source media file, if one exists.
+ipcMain.handle('review:openForFile', (e, filePath) => {
+  try {
+    const dir = path.join(app.getPath('userData'), 'reviews');
+    const target = path.resolve(filePath);
+    let best = null, bestT = -1;
+    if (fs.existsSync(dir)) {
+      for (const f of fs.readdirSync(dir)) {
+        if (!f.endsWith('.review.json')) continue;
+        const p = path.join(dir, f);
+        try {
+          const sp = JSON.parse(fs.readFileSync(p, 'utf8')).meta?.source_path;
+          if (sp && path.resolve(sp) === target) {
+            const t = fs.statSync(p).mtimeMs;
+            if (t > bestT) { bestT = t; best = p; }
+          }
+        } catch (_) {}
+      }
+    }
+    if (best) { openReviewWindow(best); return { ok: true }; }
+    dialog.showMessageBox(mainWindow, {
+      type: 'info', buttons: ['OK'], message: 'Not transcribed for review yet',
+      detail: 'Add this file to the queue and run it — the Review & Polish window opens automatically when it finishes.',
+    });
+    return { ok: false };
+  } catch (err) { return { ok: false, error: err.message }; }
+});
 ipcMain.handle('review:pending', () => pendingReviewDoc);
 ipcMain.handle('review:load', (e, docPath) => {
   try { return { ok: true, doc: JSON.parse(fs.readFileSync(docPath, 'utf8')), path: docPath }; }

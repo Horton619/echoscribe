@@ -31,6 +31,7 @@
         <div class="header-tagline" id="header-tagline">Local transcription, on the record</div>
       </div>
     </div>
+    <button id="btn-open-review" title="Open a transcribed file to review &amp; polish">Open for Review…</button>
     <button id="btn-settings" title="Settings">&#9881;</button>
   </header>
 
@@ -112,9 +113,9 @@
 
       <div class="side-block">
         <div class="side-label">Vocabulary hint <span class="side-label-opt">optional</span></div>
-        <textarea id="vocab-hint" class="side-textarea" rows="3"
-          placeholder="Proper nouns, acronyms, jargon for this event — e.g. TSCRA, NCARB, Dr. Okafor, Cervantes"></textarea>
-        <div class="side-hint">Nudges Whisper toward the right spelling of names it wouldn't otherwise know.</div>
+        <textarea id="vocab-hint" class="side-textarea" rows="2"
+          placeholder="A few key names, comma-separated — e.g. TSCRA, NCARB, Dr. Okafor, Cervantes"></textarea>
+        <div class="side-hint"><strong>Keep it short — a handful of comma-separated terms, not a sentence.</strong> A long or sentence-shaped hint can make Whisper hallucinate and drop words at pauses. For bulk spelling fixes, use the corrections list in the Review window instead.</div>
       </div>
 
       <div class="side-block">

@@ -77,6 +77,41 @@
 .show-fillers .wd-filler { background: rgba(56, 189, 248, 0.20); }
 /* the word currently playing (follows the audio) */
 .wd-playing { background: var(--accent-dim2); box-shadow: inset 0 -2px 0 var(--accent); border-radius: 3px; }
+/* search matches + jump flash */
+.wd-match { background: rgba(255,181,71,.25); border-radius: 2px; }
+.wd-match-current { background: var(--accent); color: #17100A; border-radius: 2px; }
+.wd-flash { animation: wdflash 1.3s ease; }
+@keyframes wdflash { 0%, 35% { background: var(--accent); color: #17100A; border-radius: 2px; } 100% { background: transparent; } }
+
+/* ---- transcript search bar ---- */
+.transcript-search { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 6px; padding: 8px 26px; background: var(--bg); border-bottom: 1px solid var(--border); }
+.transcript-search input { flex: 1 1 auto; min-width: 0; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); padding: 5px 10px; font-size: 13px; outline: none; }
+.transcript-search input:focus { border-color: var(--accent); }
+.search-count { font-size: 12px; color: var(--text-muted); min-width: 42px; text-align: right; font-variant-numeric: tabular-nums; }
+.search-nav { background: transparent; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-dim); width: 24px; height: 24px; cursor: pointer; font-size: 12px; padding: 0; line-height: 1; }
+.search-nav:hover { border-color: var(--accent); color: var(--text); }
+
+/* ---- lowest-confidence ranked list (idle panel) ---- */
+.lowconf-head { font-size: 11px; font-weight: 700; color: var(--text); text-transform: uppercase; letter-spacing: .08em; }
+.lowconf-sub { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--text-muted); font-size: 11px; margin-left: 6px; }
+.lowconf-list { list-style: none; padding: 0; margin: 10px 0 18px; display: flex; flex-direction: column; gap: 1px; max-height: 48vh; overflow-y: auto; }
+.lowconf-list li { display: flex; align-items: baseline; gap: 8px; padding: 4px 6px; border-radius: var(--radius-sm); cursor: pointer; }
+.lowconf-list li:hover { background: var(--accent-dim); }
+.lowconf-pct { color: var(--error); font-variant-numeric: tabular-nums; font-size: 11.5px; min-width: 30px; flex: 0 0 auto; }
+.lowconf-word { color: var(--text); font-size: 13px; font-weight: 600; flex: 0 0 auto; }
+.lowconf-ctx { color: var(--text-muted); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lowconf-empty { color: var(--text-muted); font-size: 12.5px; }
+
+/* ---- corrections rows (word-lists modal) ---- */
+.corr-rows { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+.corr-row { display: flex; align-items: center; gap: 6px; }
+.corr-row input { flex: 1 1 0; min-width: 0; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); padding: 6px 9px; font-size: 13px; outline: none; }
+.corr-row input:focus { border-color: var(--accent); }
+.corr-arrow { color: var(--text-dim); flex: 0 0 auto; }
+.corr-del { background: transparent; border: 0; color: var(--text-muted); font-size: 16px; cursor: pointer; flex: 0 0 auto; padding: 0 4px; line-height: 1; }
+.corr-del:hover { color: var(--error); }
+.corr-add { margin-bottom: 14px; align-self: flex-start; }
+.lists-label-sp { margin-top: 4px; }
 
 /* Applied changes always show inline: struck original → replacement, clickable. */
 .wd-mod { cursor: pointer; border-radius: 3px; padding: 0 1px; }

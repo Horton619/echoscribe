@@ -40,12 +40,19 @@
 
   <main class="review-main">
     <div class="review-transcript-wrap">
+      <div class="transcript-search">
+        <input type="text" id="search-input" placeholder="Search transcript…" spellcheck="false" autocomplete="off">
+        <span class="search-count" id="search-count"></span>
+        <button class="search-nav" id="search-prev" title="Previous match (Shift+Enter)" aria-label="Previous match">&#8593;</button>
+        <button class="search-nav" id="search-next" title="Next match (Enter)" aria-label="Next match">&#8595;</button>
+      </div>
       <div id="transcript" class="transcript"></div>
     </div>
 
     <aside class="review-panel" id="review-panel">
       <div id="panel-idle" class="panel-idle">
-        <p>Pick a mode, tune the toggles, then <strong>Run sweep</strong>.</p>
+        <div class="lowconf-head">Lowest-confidence words <span class="lowconf-sub">click to jump &amp; hear</span></div>
+        <ul class="lowconf-list" id="lowconf-list"></ul>
         <ul class="panel-legend">
           <li><span class="legend-swatch swatch-mid"></span>medium confidence</li>
           <li><span class="legend-swatch swatch-conf"></span>low confidence</li>
@@ -82,10 +89,10 @@
         <button class="settings-close" id="btn-lists-close">&#10005;</button>
       </div>
       <div class="lists-body">
-        <label class="lists-label" for="ta-corrections">Corrections — one <code>wrong =&gt; right</code> per line</label>
-        <textarea id="ta-corrections" class="lists-textarea" spellcheck="false"
-          placeholder="planner =&gt; planter&#10;Fent =&gt; Fendt&#10;Heston =&gt; Hesston"></textarea>
-        <label class="lists-label" for="ta-fillers">Filler words — comma or newline separated</label>
+        <label class="lists-label">Corrections — replace a misheard word with the right one</label>
+        <div class="corr-rows" id="corr-rows"></div>
+        <button class="btn-review-ghost corr-add" id="corr-add">+ Add correction</button>
+        <label class="lists-label lists-label-sp" for="ta-fillers">Filler words — comma or newline separated</label>
         <textarea id="ta-fillers" class="lists-textarea lists-textarea-short" spellcheck="false"
           placeholder="um, uh, you know, i mean"></textarea>
         <label class="review-check review-check-block"><input type="checkbox" id="tg-filler-remove"><span>Remove filler words in the sweep</span></label>

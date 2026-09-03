@@ -104,6 +104,7 @@ async function loadDoc(docPath) {
   showPanel('idle');
   $('btn-save').disabled = true;
   $('btn-revert').hidden = true;
+  search.q = ''; if ($('search-input')) { $('search-input').value = ''; $('search-count').textContent = ''; }
   render();
   setStatus(`${state.words.length} words loaded.`);
 }
@@ -130,6 +131,8 @@ function render() {
     para.appendChild(buildWord(w, fset, thr));
   }
   if (para.childNodes.length) wrap.appendChild(para);
+  renderLowConf();
+  if (search.q) applySearchHighlights();
 }
 
 function buildWord(w, fset, thr) {
@@ -388,6 +391,74 @@ function scrollToWord(i) {
   const el = document.querySelector(`.wd[data-i="${i}"]`);
   if (el) el.scrollIntoView({ block: 'center', behavior: 'smooth' });
 }
+function jumpToWord(i, play) {
+  scrollToWord(i);
+  const el = document.querySelector(`.wd[data-i="${i}"]`);
+  if (el) { el.classList.remove('wd-flash'); void el.offsetWidth; el.classList.add('wd-flash'); }
+  if (play) playFrom(state.words[i].s);
+}
+
+// ---------------------------------------------------------------- low-confidence triage
+function renderLowConf() {
+  const el = $('lowconf-list');
+  if (!el) return;
+  const cand = state.words.filter((w) => !w.removed && !w.hidden && !w.changed && w.p < 0.75)
+    .sort((a, b) => a.p - b.p).slice(0, 25);
+  if (!cand.length) { el.innerHTML = '<li class="lowconf-empty">Nothing shaky — every word is high-confidence.</li>'; return; }
+  el.innerHTML = '';
+  for (const w of cand) {
+    const li = document.createElement('li');
+    const ctx = state.words.slice(Math.max(0, w.i - 2), w.i).map((x) => x.text).join('').trim();
+    li.innerHTML = `<span class="lowconf-pct">${Math.round(w.p * 100)}%</span><span class="lowconf-word"></span><span class="lowconf-ctx"></span>`;
+    li.querySelector('.lowconf-word').textContent = w.text.trim();
+    li.querySelector('.lowconf-ctx').textContent = ctx ? `…${ctx}` : '';
+    li.title = `${fmtT(w.s)} — click to jump and hear it`;
+    li.onclick = () => jumpToWord(w.i, true);
+    el.appendChild(li);
+  }
+}
+
+// ---------------------------------------------------------------- transcript search
+const search = { q: '', matches: [], idx: 0 };
+function computeMatches(q) {
+  q = q.trim().toLowerCase();
+  if (!q) return [];
+  const toks = q.split(/\s+/);
+  const out = [];
+  for (let i = 0; i < state.words.length; i++) {
+    if (state.words[i].hidden) continue;
+    let j = i, k = 0; const idxs = [];
+    while (k < toks.length && j < state.words.length) {
+      if (state.words[j].hidden) { j++; continue; }
+      if (!state.words[j].text.toLowerCase().includes(toks[k])) break;
+      idxs.push(j); j++; k++;
+    }
+    if (k === toks.length) out.push(idxs);
+  }
+  return out;
+}
+function applySearchHighlights() {
+  document.querySelectorAll('.wd-match, .wd-match-current').forEach((e) => e.classList.remove('wd-match', 'wd-match-current'));
+  search.matches.forEach((m, mi) => m.forEach((wi) => {
+    const el = document.querySelector(`.wd[data-i="${wi}"]`);
+    if (el) el.classList.add(mi === search.idx ? 'wd-match-current' : 'wd-match');
+  }));
+}
+function doSearch(q) {
+  search.q = q;
+  search.matches = computeMatches(q);
+  search.idx = 0;
+  $('search-count').textContent = q.trim() ? (search.matches.length ? `1/${search.matches.length}` : '0') : '';
+  applySearchHighlights();
+  if (search.matches.length) scrollToWord(search.matches[0][0]);
+}
+function gotoMatch(delta) {
+  if (!search.matches.length) return;
+  search.idx = (search.idx + delta + search.matches.length) % search.matches.length;
+  $('search-count').textContent = `${search.idx + 1}/${search.matches.length}`;
+  applySearchHighlights();
+  scrollToWord(search.matches[search.idx][0]);
+}
 
 // ---------------------------------------------------------------- change list, summary, save
 function computeChanges() {
@@ -554,14 +625,28 @@ function highlightPlaying(ct) {
 }
 
 // ---------------------------------------------------------------- lists editor
+function addCorrRow(from, to) {
+  const row = document.createElement('div');
+  row.className = 'corr-row';
+  row.innerHTML = '<input class="corr-from" placeholder="heard as…" spellcheck="false"><span class="corr-arrow">→</span><input class="corr-to" placeholder="should be…" spellcheck="false"><button class="corr-del" title="Remove" aria-label="Remove">✕</button>';
+  row.querySelector('.corr-from').value = from || '';
+  row.querySelector('.corr-to').value = to || '';
+  row.querySelector('.corr-del').onclick = () => row.remove();
+  $('corr-rows').appendChild(row);
+  return row;
+}
 function openLists() {
-  $('ta-corrections').value = state.cfg.corrections.map(([f, t]) => `${f} => ${t}`).join('\n');
+  const rows = $('corr-rows'); rows.innerHTML = '';
+  state.cfg.corrections.forEach(([f, t]) => addCorrRow(f, t));
+  addCorrRow('', '');   // one blank row ready to type into
   $('ta-fillers').value = state.cfg.fillerWords.join(', ');
   $('tg-filler-remove').checked = state.cfg.fillerRemove;
   $('lists-overlay').classList.remove('hidden');
 }
 async function saveLists() {
-  const corrections = $('ta-corrections').value.split('\n').map((l) => { const i = l.indexOf('=>'); return i >= 0 ? [l.slice(0, i).trim(), l.slice(i + 2).trim()] : null; }).filter((x) => x && x[0] && x[1]);
+  const corrections = [...$('corr-rows').querySelectorAll('.corr-row')]
+    .map((r) => [r.querySelector('.corr-from').value.trim(), r.querySelector('.corr-to').value.trim()])
+    .filter(([f, t]) => f && t);
   const fillerWords = $('ta-fillers').value.split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
   const fillerRemove = $('tg-filler-remove').checked;
   Object.assign(state.cfg, { corrections, fillerWords, fillerRemove });
@@ -596,6 +681,7 @@ function bindUI() {
   $('conf-threshold').addEventListener('change', () => { render(); api.setSetting('confidenceThreshold', parseFloat($('conf-threshold').value) || 0.5); });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') { closeMenu(); const o = $('lists-overlay'); if (!o.classList.contains('hidden')) o.classList.add('hidden'); }
+    else if ((e.metaKey || e.ctrlKey) && e.key === 'f') { e.preventDefault(); $('search-input').focus(); $('search-input').select(); }
     else if (e.key === ' ' && !/^(INPUT|TEXTAREA)$/.test(e.target.tagName || '')) { e.preventDefault(); togglePlay(); }
   });
   const a = $('raudio');
@@ -611,6 +697,11 @@ function bindUI() {
   $('btn-lists-close').addEventListener('click', () => $('lists-overlay').classList.add('hidden'));
   $('btn-lists-cancel').addEventListener('click', () => $('lists-overlay').classList.add('hidden'));
   $('btn-lists-save').addEventListener('click', saveLists);
+  $('corr-add').addEventListener('click', () => addCorrRow('', '').querySelector('.corr-from').focus());
+  $('search-input').addEventListener('input', (e) => doSearch(e.target.value));
+  $('search-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); gotoMatch(e.shiftKey ? -1 : 1); } });
+  $('search-prev').addEventListener('click', () => gotoMatch(-1));
+  $('search-next').addEventListener('click', () => gotoMatch(1));
 }
 
 boot();
